@@ -43,6 +43,7 @@ async def init_db():
     pool = await asyncpg.create_pool(DATABASE_URL)
     
     async with pool.acquire() as conn:
+        # Создаем таблицу, если нет
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -52,9 +53,17 @@ async def init_db():
                 losses INTEGER DEFAULT 0,
                 pushes INTEGER DEFAULT 0,
                 blackjacks INTEGER DEFAULT 0,
-                max_balance INTEGER DEFAULT 1000
+                max_balance INTEGER DEFAULT 1000,
+                max_win INTEGER DEFAULT 0
             )
         """)
+        
+        # Миграция: добавляем колонку max_win для старых пользователей, если её нет
+        try:
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_win INTEGER DEFAULT 0")
+        except asyncpg.exceptions.DuplicateColumnError:
+            pass # Колонка уже есть
+            
         print("Database initialized")
 
 async def get_player(user_id):
@@ -63,19 +72,26 @@ async def get_player(user_id):
         
         if not row:
             await conn.execute(
-                "INSERT INTO users (user_id, balance, max_balance) VALUES ($1, $2, $2) ON CONFLICT DO NOTHING",
+                "INSERT INTO users (user_id, balance, max_balance, max_win) VALUES ($1, $2, $2, 0) ON CONFLICT DO NOTHING",
                 user_id, START_BALANCE
             )
             return {
                 "balance": START_BALANCE,
-                "stats": {"games":0, "wins":0, "losses":0, "pushes":0, "blackjacks":0, "max_balance":START_BALANCE}
+                "stats": {
+                    "games":0, "wins":0, "losses":0, "pushes":0, 
+                    "blackjacks":0, "max_balance":START_BALANCE, "max_win": 0
+                }
             }
+        
+        # Безопасно получаем max_win (для старых записей может быть None, если миграция сработала странно, но default 0 спасет)
+        m_win = row["max_win"] if row["max_win"] is not None else 0
         
         return {
             "balance": row["balance"],
             "stats": {
                 "games": row["games"], "wins": row["wins"], "losses": row["losses"],
-                "pushes": row["pushes"], "blackjacks": row["blackjacks"], "max_balance": row["max_balance"]
+                "pushes": row["pushes"], "blackjacks": row["blackjacks"], 
+                "max_balance": row["max_balance"], "max_win": m_win
             }
         }
 
@@ -84,30 +100,28 @@ async def update_player_db(user_id, balance, stats):
         await conn.execute("""
             UPDATE users SET 
                 balance = $2, 
-                games = $3, wins = $4, losses = $5, pushes = $6, blackjacks = $7, max_balance = $8
+                games = $3, wins = $4, losses = $5, pushes = $6, 
+                blackjacks = $7, max_balance = $8, max_win = $9
             WHERE user_id = $1
-        """, user_id, balance, stats["games"], stats["wins"], stats["losses"], stats["pushes"], stats["blackjacks"], stats["max_balance"])
+        """, user_id, balance, stats["games"], stats["wins"], stats["losses"], 
+           stats["pushes"], stats["blackjacks"], stats["max_balance"], stats["max_win"])
 
 # ====== ЛОГИКА КОЛОДЫ (SHOE) ======
-# user_id -> [список карт]
 user_shoes = {}
 
 def create_shoe():
-    """Создает новую 'туфлю' из 5 колод и перемешивает"""
     base_deck = [(r, s) for r in RANKS for s in SUITS]
     shoe = base_deck * DECKS_COUNT
     random.shuffle(shoe)
     return shoe
 
 def get_card(user_id):
-    """Берет карту из колоды игрока. Если карт мало — мешает новую."""
     if user_id not in user_shoes:
         user_shoes[user_id] = create_shoe()
     
     shoe = user_shoes[user_id]
     shuffled_msg = None
 
-    # Проверка "подрезной карты" (Penetration)
     if len(shoe) < RESHUFFLE_THRESHOLD:
         user_shoes[user_id] = create_shoe()
         shoe = user_shoes[user_id]
@@ -117,7 +131,7 @@ def get_card(user_id):
     return card, shuffled_msg
 
 # ====== ЛОГИКА ИГРЫ ======
-active_games = {} # user_id -> dict
+active_games = {} 
 
 def card_value(card):
     rank, _ = card
@@ -156,11 +170,12 @@ def game_kb():
 
 def game_over_kb(bet):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"play_again_{bet}")],
+        [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"play_again_{bet}"),
+         InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
         [InlineKeyboardButton(text="💰 Изменить ставку", callback_data="play")]
     ])
 
-# ====== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ЗАПУСКА ======
+# ====== ХЕНДЛЕРЫ ======
 async def start_game_logic(user_id, bet, messageable):
     p = await get_player(user_id)
     
@@ -173,13 +188,11 @@ async def start_game_logic(user_id, bet, messageable):
             await messageable.answer(text, reply_markup=bet_kb())
         return
 
-    # Раздача карт с учетом колоды
     c1, s1 = get_card(user_id)
     c2, s2 = get_card(user_id)
     d1, s3 = get_card(user_id)
     d2, s4 = get_card(user_id)
     
-    # Собираем сообщения о перемешивании (если было)
     shuffles = [x for x in [s1, s2, s3, s4] if x]
     shuffle_note = f"\n\n_{shuffles[0]}_" if shuffles else ""
 
@@ -203,7 +216,6 @@ async def start_game_logic(user_id, bet, messageable):
     if hand_value(g['player']) == 21:
         await finish_game(user_id, messageable, blackjack=True)
 
-# ====== ХЕНДЛЕРЫ ======
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -245,11 +257,10 @@ async def cb_bet(call: CallbackQuery):
     bet = int(call.data.split("_")[1])
     await start_game_logic(call.from_user.id, bet, call)
 
-# Хендлер для кнопки "Играть еще"
 @dp.callback_query(lambda c: c.data.startswith("play_again_"))
 async def cb_play_again(call: CallbackQuery):
     try:
-        bet = int(call.data.split("_")[2]) # play_again_100 -> берем 100
+        bet = int(call.data.split("_")[2])
         await start_game_logic(call.from_user.id, bet, call)
     except (IndexError, ValueError):
         await call.answer("Ошибка повтора ставки", show_alert=True)
@@ -258,10 +269,28 @@ async def cb_play_again(call: CallbackQuery):
 async def cb_stats(call: CallbackQuery):
     p = await get_player(call.from_user.id)
     s = p['stats']
+    
+    # Расчет процента побед
+    total_games = s['games']
+    win_rate = round((s['wins'] / total_games * 100), 1) if total_games > 0 else 0
+    
+    stats_text = (
+        f"📊 *Личная статистика*\n\n"
+        f"🎮 Игры: *{s['games']}*\n"
+        f"🏆 Победы: *{s['wins']}*\n"
+        f"💀 Поражения: *{s['losses']}*\n"
+        f"🤝 Ничьи: *{s['pushes']}*\n"
+        f"🃏 Blackjack: *{s['blackjacks']}*\n"
+        f"📈 Win Rate: *{win_rate}%*\n\n"
+        f"🪙 Баланс: *{p['balance']}*\n"
+        f"🏦 Макс. баланс: *{s['max_balance']}*\n"
+        f"🤑 Макс. выигрыш: *{s['max_win']}*"
+    )
+    
     await call.message.edit_text(
-        f"📊 *Статистика*\nИгр: {s['games']}\nПобед: {s['wins']}\nМакс: {s['max_balance']}",
+        stats_text,
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="menu")]])
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]])
     )
 
 @dp.callback_query(lambda c: c.data == "menu")
@@ -275,7 +304,6 @@ async def cb_hit(call: CallbackQuery):
     if uid not in active_games: return
     g = active_games[uid]
     
-    # Берем карту из колоды
     new_card, shuffle_msg = get_card(uid)
     g['player'].append(new_card)
     
@@ -297,7 +325,6 @@ async def cb_stand(call: CallbackQuery):
     if uid not in active_games: return
     g = active_games[uid]
     
-    # Дилер добирает карты из колоды
     shuffle_happened = False
     while hand_value(g['dealer']) < 17:
         card, s_msg = get_card(uid)
@@ -343,6 +370,10 @@ async def finish_game(user_id, messageable, blackjack=False, lose=False, shuffle
     p['stats']['games'] += 1
     p['stats']['max_balance'] = max(p['stats']['max_balance'], new_bal)
     
+    # Обновляем максимальный выигрыш (только если выиграли)
+    if win_amount > 0 and win_amount > p['stats']['max_win']:
+        p['stats']['max_win'] = win_amount
+    
     await update_player_db(user_id, new_bal, p['stats'])
     
     shuffle_note = "\n\n_🔄 Колода перемешана_" if shuffle_alert else ""
@@ -360,7 +391,6 @@ async def finish_game(user_id, messageable, blackjack=False, lose=False, shuffle
     else:
         await messageable.answer(txt, reply_markup=game_over_kb(bet), parse_mode="Markdown")
 
-# ====== ЗАПУСК ======
 async def main():
     await init_db()
     print("Bot started")
