@@ -98,7 +98,7 @@ class CardSystem:
     def get_card(self):
         if len(self.shoe) < RESHUFFLE_THRESHOLD:
             self.create_shoe()
-            return self.shoe.pop(), True # True = перемешано
+            return self.shoe.pop(), True 
         return self.shoe.pop(), False
 
     def get_visual_bar(self):
@@ -107,10 +107,6 @@ class CardSystem:
         bar = "▓" * blocks + "░" * (10 - blocks)
         return f"🎴 Колода: {bar} ({int(percent * 100)}%)"
 
-# Глобальная колода для столов (можно сделать по одной на стол, сделаем пока одну общую для экономии памяти, 
-# либо в будущем перенесем внутрь Table)
-# Для честности лучше: 1 Стол = 1 Колода. Сделаем так.
-
 class TablePlayer:
     def __init__(self, user_id, name, bet):
         self.user_id = user_id
@@ -118,8 +114,8 @@ class TablePlayer:
         self.bet = bet
         self.original_bet = bet
         self.hand = []
-        self.status = "playing" # playing, stand, bust, blackjack, surrender
-        self.message_id = None # ID сообщения чата, чтобы его обновлять
+        self.status = "playing" 
+        self.message_id = None 
 
     @property
     def value(self):
@@ -134,13 +130,14 @@ class TablePlayer:
         return "  ".join(f"`{r}{s}`" for r, s in self.hand)
 
 class GameTable:
-    def __init__(self, table_id, is_public=False):
+    def __init__(self, table_id, is_public=False, owner_id=None):
         self.id = table_id
         self.is_public = is_public
-        self.players = [] # Список объектов TablePlayer
+        self.owner_id = owner_id
+        self.players = [] 
         self.dealer_hand = []
         self.deck = CardSystem()
-        self.state = "waiting" # waiting, dealing, player_turn, dealer_turn, finished
+        self.state = "waiting" # waiting (lobby), dealing, player_turn, dealer_turn, finished
         self.current_player_index = 0
         self.shuffle_alert = False
 
@@ -159,7 +156,6 @@ class GameTable:
         self.dealer_hand = []
         self.shuffle_alert = False
         
-        # Дилеру
         c, s = self.deck.get_card()
         if s: self.shuffle_alert = True
         self.dealer_hand.append(c)
@@ -168,31 +164,28 @@ class GameTable:
         if s: self.shuffle_alert = True
         self.dealer_hand.append(c)
 
-        # Игрокам
         for p in self.players:
             p.hand = []
+            p.status = "playing" # сброс статуса для новой игры
             c1, s1 = self.deck.get_card()
             c2, s2 = self.deck.get_card()
             p.hand = [c1, c2]
             if s1 or s2: self.shuffle_alert = True
             
-            # Проверка на Блэкджек сразу
             if p.value == 21:
                 p.status = "blackjack"
         
         self.state = "player_turn"
         self.current_player_index = 0
-        self.process_turns() # Проверяем, может первый уже выиграл или все выиграли
+        self.process_turns() 
 
     def process_turns(self):
-        # Ищем следующего игрока, который 'playing'
         while self.current_player_index < len(self.players):
             p = self.players[self.current_player_index]
             if p.status == "playing":
-                return # Нашли, ждем его хода
+                return 
             self.current_player_index += 1
         
-        # Если игроков не осталось -> ход дилера
         self.state = "dealer_turn"
         self.play_dealer()
 
@@ -214,19 +207,17 @@ class GameTable:
         return val
 
 # Глобальное хранилище столов
-tables = {} # table_id -> GameTable
+tables = {} 
 
 # ====== ХЕЛПЕРЫ ДЛЯ ОТОБРАЖЕНИЯ ======
 
 async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bot):
-    # Дилер
     if table.state == "finished":
         d_val = table._hand_value(table.dealer_hand)
         dealer_str = f"🤵 Дилер:  {'  '.join(f'`{r}{s}`' for r,s in table.dealer_hand)}  (*{d_val}*)"
     else:
         dealer_str = f"🤵 Дилер:  `{table.dealer_hand[0][0]}{table.dealer_hand[0][1]}`  `❓`"
 
-    # Игроки (строим список)
     players_str = ""
     for p in table.players:
         marker = "👈" if (table.state == "player_turn" and table.players[table.current_player_index] == p) else ""
@@ -242,23 +233,18 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         
         players_str += f"{name_display}: {p.render_hand()} (*{p.value}*) {status_icon} {marker}\n"
 
-    # Подвал
     shoe = table.deck.get_visual_bar()
     shuffle_note = "\n\n_🔄 Колода перемешана_" if table.shuffle_alert else ""
     
-    # Результат (если конец)
     res_text = ""
     if table.state == "finished":
         d_val = table._hand_value(table.dealer_hand)
-        
-        # Расчет для КОНКРЕТНОГО игрока, кому рендерим
         win = 0
         if player.status == "bust":
             res_text = "\n❌ *Перебор / Проигрыш*"
             win = -player.bet
         elif player.status == "blackjack":
-             # Если у дилера не BJ
-            if d_val != 21 or len(table.dealer_hand) != 2: # Упрощенно, в казино проверка дилера BJ сложнее
+            if d_val != 21 or len(table.dealer_hand) != 2:
                 res_text = "\n🃏 *BLACKJACK! Победа!*"
                 win = int(player.bet * 1.5)
             else:
@@ -276,10 +262,6 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         else:
              res_text = "\n🤝 *Ничья*"
              win = 0
-             
-        # Обновляем БД (только один раз делаем это в контроллере, здесь просто отображение)
-        # ВАЖНО: Мы не пишем в БД в функции рендера!
-        
         res_text += f" ({win:+})"
 
     text = (
@@ -292,20 +274,17 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
     return text
 
 def get_game_kb(table: GameTable, player: TablePlayer):
-    # Если конец игры
     if table.state == "finished":
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔁 Еще раз", callback_data=f"replay_{table.id}_{player.original_bet}"),
              InlineKeyboardButton(text="🚪 Меню", callback_data="menu")]
         ])
 
-    # Если не ход этого игрока
     current_p = table.players[table.current_player_index]
     if current_p != player:
-        return None # Нет кнопок, если не твой ход
+        return None 
 
-    # Если ход игрока
-    can_double = True # Проверку баланса добавим в хендлер
+    can_double = True 
     
     kb = [
         [InlineKeyboardButton(text="🖐 HIT", callback_data=f"hit_{table.id}"),
@@ -327,7 +306,6 @@ async def update_table_messages(table_id):
             txt = await render_table_for_player(table, p, bot)
             kb = get_game_kb(table, p)
             try:
-                # Если текст и клавиатура не изменились, телеграм кинет ошибку, игнорим её
                 await bot.edit_message_text(txt, chat_id=p.user_id, message_id=p.message_id, reply_markup=kb, parse_mode="Markdown")
             except TelegramBadRequest:
                 pass
@@ -335,7 +313,6 @@ async def update_table_messages(table_id):
                 print(f"Error update msg: {e}")
 
 async def finalize_game_db(table: GameTable):
-    # Сохраняем результаты в БД для всех
     d_val = table._hand_value(table.dealer_hand)
     
     for p in table.players:
@@ -349,7 +326,6 @@ async def finalize_game_db(table: GameTable):
             win_amount = -p.bet
             stats['losses'] += 1
         elif p.status == "blackjack":
-             # Проверка BJ дилера для простоты опустим (считаем BJ игрока победой 3:2 всегда, если не PUSH)
              win_amount = int(p.bet * 1.5)
              stats['wins'] += 1
              stats['blackjacks'] += 1
@@ -373,7 +349,6 @@ async def finalize_game_db(table: GameTable):
 
 # ====== ХЕНДЛЕРЫ ======
 
-# FSM
 class BetState(StatesGroup):
     waiting = State()
 
@@ -388,6 +363,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👤 Одиночная игра", callback_data="play_solo")],
+            [InlineKeyboardButton(text="👥 Онлайн столы", callback_data="play_multi")],
             [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
         ])
     )
@@ -399,6 +375,7 @@ async def cb_menu(call: CallbackQuery):
         f"🪙 Баланс: {data['balance']}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👤 Одиночная игра", callback_data="play_solo")],
+            [InlineKeyboardButton(text="👥 Онлайн столы", callback_data="play_multi")],
             [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
         ])
     )
@@ -412,24 +389,42 @@ async def cb_play_solo(call: CallbackQuery):
     
     await call.message.edit_text(f"🪙 Баланс: {data['balance']}\nВыберите ставку:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
+# -- МУЛЬТИПЛЕЕР (ЛОББИ) ЗАГОТОВКА --
+@dp.callback_query(lambda c: c.data == "play_multi")
+async def cb_play_multi(call: CallbackQuery):
+    # Покажем список столов (пока просто кнопка создать)
+    public_tables = [t for t in tables.values() if t.is_public and t.state == "waiting"]
+    
+    text = f"👥 *Онлайн Лобби*\nОткрытых столов: {len(public_tables)}"
+    
+    kb = []
+    # Если есть столы - покажем (потом допишем логику входа)
+    for t in public_tables[:3]: # макс 3
+        kb.append([InlineKeyboardButton(text=f"Стол #{t.id} (???)", callback_data=f"join_{t.id}")])
+        
+    kb.append([InlineKeyboardButton(text="➕ Создать стол", callback_data="create_table")])
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="menu")])
+    
+    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(lambda c: c.data == "create_table")
+async def cb_create_table(call: CallbackQuery):
+    await call.answer("Функция в разработке! (Скоро)", show_alert=True)
+
 # -- Запуск Соло Игры --
 async def start_solo_game(user_id, name, bet, message_entity):
-    # 1. Проверка баланса
     data = await get_player_data(user_id)
     if data['balance'] < bet:
         await message_entity.answer("❌ Недостаточно средств!")
         return
 
-    # 2. Создаем стол
     table_id = str(uuid.uuid4())[:8]
     table = GameTable(table_id, is_public=False)
     player = table.add_player(user_id, name, bet)
     tables[table_id] = table
     
-    # 3. Раздача
     table.deal_initial()
     
-    # 4. Отправка сообщения
     txt = await render_table_for_player(table, player, bot)
     kb = get_game_kb(table, player)
     
@@ -440,10 +435,9 @@ async def start_solo_game(user_id, name, bet, message_entity):
         msg = await message_entity.answer(txt, reply_markup=kb, parse_mode="Markdown")
         player.message_id = msg.message_id
 
-    # 5. Если сразу конец (BJ у всех)
     if table.state == "finished":
         await finalize_game_db(table)
-        await update_table_messages(table_id) # обновить, чтобы показать результат
+        await update_table_messages(table_id)
 
 @dp.callback_query(lambda c: c.data.startswith("start_solo_"))
 async def cb_start_solo_bet(call: CallbackQuery):
@@ -452,10 +446,8 @@ async def cb_start_solo_bet(call: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("replay_"))
 async def cb_replay(call: CallbackQuery):
-    # replay_tableid_bet
     parts = call.data.split("_")
     bet = int(parts[2])
-    # Старый стол удаляем из памяти, создаем новый
     await start_solo_game(call.from_user.id, call.from_user.first_name, bet, call)
 
 # -- Игровые действия --
@@ -470,7 +462,6 @@ async def cb_hit(call: CallbackQuery):
     if not player or table.players[table.current_player_index] != player:
         return await call.answer("Не твой ход!")
 
-    # Логика Hit
     c, s = table.deck.get_card()
     if s: table.shuffle_alert = True
     player.hand.append(c)
@@ -478,13 +469,12 @@ async def cb_hit(call: CallbackQuery):
     if player.value > 21:
         player.status = "bust"
         await call.answer("Перебор!", show_alert=False)
-        table.process_turns() # переход хода
+        table.process_turns() 
     elif player.value == 21:
         player.status = "stand"
         await call.answer("21! Стоп.", show_alert=False)
         table.process_turns()
     
-    # Если стол завершился
     if table.state == "finished":
         await finalize_game_db(table)
     
@@ -502,7 +492,7 @@ async def cb_stand(call: CallbackQuery):
 
     player.status = "stand"
     await call.answer("Стоп.")
-    table.process_turns() # Переход хода
+    table.process_turns() 
     
     if table.state == "finished":
         await finalize_game_db(table)
@@ -516,7 +506,6 @@ async def cb_double(call: CallbackQuery):
     if not table: return 
     player = table.get_player(call.from_user.id)
     
-    # Проверка баланса
     data = await get_player_data(player.user_id)
     if data['balance'] < player.bet * 2:
         return await call.answer("Не хватает фишек!", show_alert=True)
@@ -529,7 +518,7 @@ async def cb_double(call: CallbackQuery):
     if player.value > 21:
         player.status = "bust"
     else:
-        player.status = "stand" # После дабла всегда стенд
+        player.status = "stand" 
         
     await call.answer(f"Удвоение! Ставка: {player.bet}")
     table.process_turns()
@@ -539,20 +528,34 @@ async def cb_double(call: CallbackQuery):
     
     await update_table_messages(table_id)
 
-# -- Статистика --
+# -- Статистика (ВОЗВРАЩЕНА ПОЛНАЯ ВЕРСИЯ) --
 @dp.callback_query(lambda c: c.data == "stats")
 async def cb_stats(call: CallbackQuery):
     data = await get_player_data(call.from_user.id)
     s = data['stats']
-    rate = round(s['wins']/s['games']*100, 1) if s['games'] else 0
-    txt = (
-        f"📊 *Статистика*\n"
-        f"Игр: {s['games']} | Побед: {s['wins']} ({rate}%)\n"
-        f"Баланс: {data['balance']}\n"
-        f"Макс. выигрыш: {s['max_win']}\n"
-        f"ID: `{call.from_user.id}`"
+    
+    total_games = s['games']
+    win_rate = round((s['wins'] / total_games * 100), 1) if total_games > 0 else 0
+    
+    stats_text = (
+        f"📊 *Личная статистика*\n\n"
+        f"🎮 Игры: *{s['games']}*\n"
+        f"🏆 Победы: *{s['wins']}*\n"
+        f"💀 Поражения: *{s['losses']}*\n"
+        f"🤝 Ничьи: *{s['pushes']}*\n"
+        f"🃏 Blackjack: *{s['blackjacks']}*\n"
+        f"📈 Win Rate: *{win_rate}%*\n\n"
+        f"🪙 Баланс: *{data['balance']}*\n"
+        f"🏦 Макс. баланс: *{s['max_balance']}*\n"
+        f"🤑 Макс. выигрыш: *{s['max_win']}*\n\n"
+        f"🆔 ID: `{call.from_user.id}`"
     )
-    await call.message.edit_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]]))
+    
+    await call.message.edit_text(
+        stats_text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]])
+    )
 
 # -- Кастомная ставка --
 @dp.callback_query(lambda c: c.data == "custom_bet")
@@ -572,7 +575,7 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
 
 async def main():
     await init_db()
-    print("Bot started (New Engine)")
+    print("Bot started (New Engine + Stats Fixed)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
