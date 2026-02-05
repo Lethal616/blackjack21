@@ -43,7 +43,6 @@ async def init_db():
     pool = await asyncpg.create_pool(DATABASE_URL)
     
     async with pool.acquire() as conn:
-        # Создаем таблицу, если нет
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -57,13 +56,10 @@ async def init_db():
                 max_win INTEGER DEFAULT 0
             )
         """)
-        
-        # Миграция: добавляем колонку max_win для старых пользователей, если её нет
         try:
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_win INTEGER DEFAULT 0")
         except asyncpg.exceptions.DuplicateColumnError:
-            pass # Колонка уже есть
-            
+            pass
         print("Database initialized")
 
 async def get_player(user_id):
@@ -83,9 +79,7 @@ async def get_player(user_id):
                 }
             }
         
-        # Безопасно получаем max_win (для старых записей может быть None, если миграция сработала странно, но default 0 спасет)
         m_win = row["max_win"] if row["max_win"] is not None else 0
-        
         return {
             "balance": row["balance"],
             "stats": {
@@ -130,6 +124,25 @@ def get_card(user_id):
     card = shoe.pop()
     return card, shuffled_msg
 
+# ====== ВИЗУАЛ (НОВОЕ) ======
+def render_hand(hand):
+    # Делаем карты в виде [ A♠️ ] [ 10♥️ ]
+    return "  ".join(f"[`{r}{s}`]" for r, s in hand)
+
+def get_shoe_visual(user_id):
+    if user_id not in user_shoes:
+        return "🎴 Колода: 100%"
+    
+    current = len(user_shoes[user_id])
+    # Вычисляем процент от 260 карт
+    percent = current / TOTAL_CARDS
+    
+    # Рисуем полоску из 10 кубиков
+    blocks = int(percent * 10)
+    bar = "▓" * blocks + "░" * (10 - blocks)
+    
+    return f"🎴 Колода: {bar} ({int(percent * 100)}%)"
+
 # ====== ЛОГИКА ИГРЫ ======
 active_games = {} 
 
@@ -146,9 +159,6 @@ def hand_value(hand):
         val -= 10
         aces -= 1
     return val
-
-def render_hand(hand):
-    return " ".join(f"{r}{s}" for r, s in hand)
 
 # ====== КЛАВИАТУРЫ ======
 def main_menu_kb():
@@ -203,9 +213,15 @@ async def start_game_logic(user_id, bet, messageable):
     }
     
     g = active_games[user_id]
-    txt = (f"💰 Ставка: {bet}\n"
-           f"🤵 Дилер: {g['dealer'][0][0]}{g['dealer'][0][1]} ❓\n"
-           f"🧑 Ты: {render_hand(g['player'])} ({hand_value(g['player'])})"
+    
+    # Визуал
+    dealer_show = f"[`{g['dealer'][0][0]}{g['dealer'][0][1]}`]  [`❓`]"
+    shoe_bar = get_shoe_visual(user_id)
+    
+    txt = (f"💰 Ставка: *{bet}*\n\n"
+           f"🤵 Дилер:  {dealer_show}\n"
+           f"🧑 Ты:       {render_hand(g['player'])}  (*{hand_value(g['player'])}*)\n\n"
+           f"{shoe_bar}"
            f"{shuffle_note}")
 
     if isinstance(messageable, types.CallbackQuery):
@@ -270,7 +286,6 @@ async def cb_stats(call: CallbackQuery):
     p = await get_player(call.from_user.id)
     s = p['stats']
     
-    # Расчет процента побед
     total_games = s['games']
     win_rate = round((s['wins'] / total_games * 100), 1) if total_games > 0 else 0
     
@@ -309,13 +324,17 @@ async def cb_hit(call: CallbackQuery):
     
     shuffle_note = f"\n\n_{shuffle_msg}_" if shuffle_msg else ""
     val = hand_value(g['player'])
+    shoe_bar = get_shoe_visual(uid)
     
     if val > 21:
         await finish_game(uid, call, lose=True)
     else:
-        txt = (f"💰 Ставка: {g['bet']}\n"
-               f"🤵 Дилер: {g['dealer'][0][0]}{g['dealer'][0][1]} ❓\n"
-               f"🧑 Ты: {render_hand(g['player'])} ({val})"
+        dealer_show = f"[`{g['dealer'][0][0]}{g['dealer'][0][1]}`]  [`❓`]"
+        
+        txt = (f"💰 Ставка: *{g['bet']}*\n\n"
+               f"🤵 Дилер:  {dealer_show}\n"
+               f"🧑 Ты:       {render_hand(g['player'])}  (*{val}*)\n\n"
+               f"{shoe_bar}"
                f"{shuffle_note}")
         await call.message.edit_text(txt, reply_markup=game_kb(), parse_mode="Markdown")
 
@@ -346,42 +365,43 @@ async def finish_game(user_id, messageable, blackjack=False, lose=False, shuffle
     res = "Ничья"
     
     if lose or (not blackjack and p_val > 21):
-        res = "❌ Перебор/Проигрыш"
+        res = "❌ *Перебор / Проигрыш*"
         win_amount = -bet
         p['stats']['losses'] += 1
     elif blackjack:
-        res = "🃏 BLACKJACK!"
+        res = "🃏 *BLACKJACK!*"
         win_amount = int(bet * 1.5)
         p['stats']['wins'] += 1
         p['stats']['blackjacks'] += 1
     elif d_val > 21 or p_val > d_val:
-        res = "✅ Победа!"
+        res = "✅ *Победа!*"
         win_amount = bet
         p['stats']['wins'] += 1
     elif p_val < d_val:
-        res = "❌ Дилер выиграл"
+        res = "❌ *Дилер выиграл*"
         win_amount = -bet
         p['stats']['losses'] += 1
     else:
-        res = "🤝 Ничья"
+        res = "🤝 *Ничья*"
         p['stats']['pushes'] += 1
 
     new_bal = p['balance'] + win_amount
     p['stats']['games'] += 1
     p['stats']['max_balance'] = max(p['stats']['max_balance'], new_bal)
     
-    # Обновляем максимальный выигрыш (только если выиграли)
     if win_amount > 0 and win_amount > p['stats']['max_win']:
         p['stats']['max_win'] = win_amount
     
     await update_player_db(user_id, new_bal, p['stats'])
     
     shuffle_note = "\n\n_🔄 Колода перемешана_" if shuffle_alert else ""
+    shoe_bar = get_shoe_visual(user_id)
 
     txt = (
         f"{res} ({win_amount:+})\n\n"
-        f"🤵 Дилер: {render_hand(g['dealer'])} ({d_val})\n"
-        f"🧑 Ты: {render_hand(g['player'])} ({p_val})\n\n"
+        f"🤵 Дилер:  {render_hand(g['dealer'])}  (*{d_val}*)\n"
+        f"🧑 Ты:       {render_hand(g['player'])}  (*{p_val}*)\n\n"
+        f"{shoe_bar}\n"
         f"🪙 Баланс: {new_bal}"
         f"{shuffle_note}"
     )
