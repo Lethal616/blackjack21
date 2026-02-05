@@ -307,9 +307,17 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
 
 def get_game_kb(table: GameTable, player: TablePlayer):
     if table.state == "finished":
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚪 Выйти в меню", callback_data="menu")]
-        ])
+        # Если это соло стол - даем реплей
+        if not table.is_public:
+            return InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"replay_{player.original_bet}")],
+                [InlineKeyboardButton(text="🚪 Меню", callback_data="menu")]
+            ])
+        else:
+            # Для мультиплеера сложнее с реплеем, пока просто выход
+            return InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚪 Выйти в меню", callback_data="menu")]
+            ])
 
     current_p = table.players[table.current_player_index]
     if current_p != player:
@@ -382,9 +390,8 @@ async def finalize_game_db(table: GameTable):
 
 # ====== ХЕНДЛЕРЫ ======
 
-class MultiBetState(StatesGroup):
-    joining_table_id = State()
-    waiting_bet = State()
+class BetState(StatesGroup):
+    waiting = State()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -413,6 +420,7 @@ async def cb_menu(call: CallbackQuery):
 async def cb_play_solo(call: CallbackQuery):
     data = await get_player_data(call.from_user.id)
     kb = [[InlineKeyboardButton(text=f"💰 {b}", callback_data=f"start_solo_{b}")] for b in BET_OPTIONS]
+    kb.append([InlineKeyboardButton(text="✍️ Своя ставка", callback_data="custom_bet")])
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="menu")])
     await call.message.edit_text(f"🪙 Баланс: {data['balance']}\nВыберите ставку:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
@@ -422,6 +430,58 @@ async def cb_start_solo(call: CallbackQuery):
     data = await get_player_data(call.from_user.id)
     if data['balance'] < bet: return await call.answer("Мало денег!", show_alert=True)
 
+    tid = str(uuid.uuid4())[:8]
+    table = GameTable(tid, is_public=False, owner_id=call.from_user.id)
+    tables[tid] = table
+    p = table.add_player(call.from_user.id, call.from_user.first_name, bet)
+    table.start_game()
+    txt = await render_table_for_player(table, p, bot)
+    kb = get_game_kb(table, p)
+    msg = await call.message.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
+    p.message_id = msg.message_id
+    if table.state == "finished":
+        await finalize_game_db(table)
+        await update_table_messages(tid)
+
+# -- Кастомная ставка (СОЛО) --
+@dp.callback_query(lambda c: c.data == "custom_bet")
+async def cb_custom_input(call: CallbackQuery, state: FSMContext):
+    await call.message.edit_text("✍️ Введите ставку:")
+    await state.set_state(BetState.waiting)
+
+@dp.message(BetState.waiting)
+async def process_custom_bet(message: types.Message, state: FSMContext):
+    try:
+        bet = int(message.text)
+        if bet <= 0: raise ValueError
+        # Запускаем соло игру с этой ставкой
+        data = await get_player_data(message.from_user.id)
+        if data['balance'] < bet:
+            await message.answer("Недостаточно средств!")
+            return
+        
+        tid = str(uuid.uuid4())[:8]
+        table = GameTable(tid, is_public=False, owner_id=message.from_user.id)
+        tables[tid] = table
+        p = table.add_player(message.from_user.id, message.from_user.first_name, bet)
+        table.start_game()
+        txt = await render_table_for_player(table, p, bot)
+        kb = get_game_kb(table, p)
+        msg = await message.answer(txt, reply_markup=kb, parse_mode="Markdown")
+        p.message_id = msg.message_id
+        if table.state == "finished":
+            await finalize_game_db(table)
+            await update_table_messages(tid)
+        await state.clear()
+    except:
+        await message.answer("Ошибка. Введите целое число > 0")
+
+@dp.callback_query(lambda c: c.data.startswith("replay_"))
+async def cb_replay(call: CallbackQuery):
+    parts = call.data.split("_")
+    bet = int(parts[1])
+    data = await get_player_data(call.from_user.id)
+    if data['balance'] < bet: return await call.answer("Мало денег!", show_alert=True)
     tid = str(uuid.uuid4())[:8]
     table = GameTable(tid, is_public=False, owner_id=call.from_user.id)
     tables[tid] = table
