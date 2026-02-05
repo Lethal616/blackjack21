@@ -1,21 +1,19 @@
 import os
 import asyncio
 import random
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import asyncpg
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
-# ====== ТОКЕН ИЗ ПЕРЕМЕННОЙ ОКРУЖЕНИЯ ======
+# ====== ТОКЕН И DATABASE_URL ======
 TOKEN = os.getenv("BOT_TOKEN")
-if not TOKEN:
-    raise ValueError("Не найден BOT_TOKEN в переменных окружения")
-
-# ====== DATABASE_URL ИЗ RAILWAY POSTGRES ======
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not TOKEN:
+    raise ValueError("No BOT_TOKEN")
 if not DATABASE_URL:
-    raise ValueError("Не найдена DATABASE_URL в переменных окружения (PostgreSQL)")
+    raise ValueError("No DATABASE_URL")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -23,363 +21,236 @@ dp = Dispatcher()
 # ====== НАСТРОЙКИ ======
 START_BALANCE = 1000
 BET_OPTIONS = [50, 100, 250]
-
-# ====== КАРТЫ ======
 RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
 SUITS = ["♠️", "♥️", "♦️", "♣️"]
+
+# ====== АСИНХРОННАЯ БАЗА (asyncpg) ======
+pool = None  # Пул соединений
+
+async def init_db():
+    global pool
+    pool = await asyncpg.create_pool(DATABASE_URL)
+    
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                balance INTEGER DEFAULT 1000,
+                games INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                pushes INTEGER DEFAULT 0,
+                blackjacks INTEGER DEFAULT 0,
+                max_balance INTEGER DEFAULT 1000
+            )
+        """)
+        print("Database initialized")
+
+async def get_player(user_id):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+        
+        if not row:
+            await conn.execute(
+                "INSERT INTO users (user_id, balance, max_balance) VALUES ($1, $2, $2) ON CONFLICT DO NOTHING",
+                user_id, START_BALANCE
+            )
+            # Возвращаем дефолт
+            return {
+                "balance": START_BALANCE,
+                "stats": {"games":0, "wins":0, "losses":0, "pushes":0, "blackjacks":0, "max_balance":START_BALANCE},
+                "bet": None, "last_bet": None, "in_game": False, "player": [], "dealer": []
+            }
+        
+        return {
+            "balance": row["balance"],
+            "stats": {
+                "games": row["games"], "wins": row["wins"], "losses": row["losses"],
+                "pushes": row["pushes"], "blackjacks": row["blackjacks"], "max_balance": row["max_balance"]
+            },
+            "bet": None, "last_bet": None, "in_game": False, "player": [], "dealer": []
+        }
+
+async def update_player_db(user_id, balance, stats):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users SET 
+                balance = $2, 
+                games = $3, wins = $4, losses = $5, pushes = $6, blackjacks = $7, max_balance = $8
+            WHERE user_id = $1
+        """, user_id, balance, stats["games"], stats["wins"], stats["losses"], stats["pushes"], stats["blackjacks"], stats["max_balance"])
+
+# ====== ЛОГИКА ИГРЫ (InMemory кеш для активной сессии) ======
+active_games = {} # user_id -> dict
 
 def random_card():
     return random.choice(RANKS), random.choice(SUITS)
 
 def card_value(card):
     rank, _ = card
-    if rank in ["J", "Q", "K"]:
-        return 10
-    if rank == "A":
-        return 11
+    if rank in ["J","Q","K"]: return 10
+    if rank == "A": return 11
     return int(rank)
 
 def hand_value(hand):
-    value = sum(card_value(c) for c in hand)
-    aces = sum(1 for c in hand if c[0] == "A")
-    while value > 21 and aces:
-        value -= 10
+    val = sum(card_value(c) for c in hand)
+    aces = sum(1 for c in hand if c[0]=="A")
+    while val > 21 and aces:
+        val -= 10
         aces -= 1
-    return value
+    return val
 
 def render_hand(hand):
-    return " ".join(f"{rank}{suit}" for rank, suit in hand)
-
-# ====== POSTGRES: подключение и утилиты ======
-_conn = None
-
-def get_conn():
-    global _conn
-    if _conn is None or _conn.closed != 0:
-        _conn = psycopg2.connect(DATABASE_URL)
-    return _conn
-
-def db_fetchone(query, params=()):
-    conn = get_conn()
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(query, params)
-        return cur.fetchone()
-
-def db_execute(query, params=()):
-    conn = get_conn()
-    with conn.cursor() as cur:
-        cur.execute(query, params)
-    conn.commit()
-
-# ====== ИНИЦИАЛИЗАЦИЯ ТАБЛИЦЫ ======
-db_execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id BIGINT PRIMARY KEY,
-    balance INTEGER DEFAULT 1000,
-    games INTEGER DEFAULT 0,
-    wins INTEGER DEFAULT 0,
-    losses INTEGER DEFAULT 0,
-    pushes INTEGER DEFAULT 0,
-    blackjacks INTEGER DEFAULT 0,
-    max_balance INTEGER DEFAULT 1000
-)
-""")
-
-# ====== СЛОВАРЬ ДЛЯ ИГРОКОВ (кэш в RAM) ======
-players = {}
-
-def load_player(user_id: int):
-    """Подгружает игрока из Postgres или создаёт нового"""
-    if user_id in players:
-        return players[user_id]
-
-    row = db_fetchone(
-        """
-        SELECT balance, games, wins, losses, pushes, blackjacks, max_balance
-        FROM users
-        WHERE user_id = %s
-        """,
-        (user_id,)
-    )
-
-    if row:
-        players[user_id] = {
-            "balance": row["balance"],
-            "bet": None,
-            "last_bet": None,
-            "in_game": False,
-            "player": [],
-            "dealer": [],
-            "stats": {
-                "games": row["games"],
-                "wins": row["wins"],
-                "losses": row["losses"],
-                "pushes": row["pushes"],
-                "blackjacks": row["blackjacks"],
-                "max_balance": row["max_balance"]
-            }
-        }
-    else:
-        # создаём нового игрока в БД (один раз)
-        db_execute(
-            """
-            INSERT INTO users (user_id, balance, games, wins, losses, pushes, blackjacks, max_balance)
-            VALUES (%s, %s, 0, 0, 0, 0, 0, %s)
-            ON CONFLICT (user_id) DO NOTHING
-            """,
-            (user_id, START_BALANCE, START_BALANCE)
-        )
-
-        players[user_id] = {
-            "balance": START_BALANCE,
-            "bet": None,
-            "last_bet": None,
-            "in_game": False,
-            "player": [],
-            "dealer": [],
-            "stats": {
-                "games": 0,
-                "wins": 0,
-                "losses": 0,
-                "pushes": 0,
-                "blackjacks": 0,
-                "max_balance": START_BALANCE
-            }
-        }
-
-    return players[user_id]
-
-def save_player(user_id: int):
-    """Сохраняет игрока в Postgres (upsert)"""
-    user = players[user_id]
-    s = user["stats"]
-
-    db_execute(
-        """
-        INSERT INTO users (user_id, balance, games, wins, losses, pushes, blackjacks, max_balance)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (user_id) DO UPDATE SET
-            balance = EXCLUDED.balance,
-            games = EXCLUDED.games,
-            wins = EXCLUDED.wins,
-            losses = EXCLUDED.losses,
-            pushes = EXCLUDED.pushes,
-            blackjacks = EXCLUDED.blackjacks,
-            max_balance = GREATEST(users.max_balance, EXCLUDED.max_balance)
-        """,
-        (
-            user_id,
-            user["balance"],
-            s["games"],
-            s["wins"],
-            s["losses"],
-            s["pushes"],
-            s["blackjacks"],
-            s["max_balance"],
-        )
-    )
+    return " ".join(f"{r}{s}" for r, s in hand)
 
 # ====== КЛАВИАТУРЫ ======
-def main_menu_keyboard():
+def main_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🃏 Играть", callback_data="play")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="show_stats")]
+        [InlineKeyboardButton(text="🃏 Играть", callback_data="play"),
+         InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
     ])
 
-def bet_keyboard():
+def bet_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"💰 {b}", callback_data=f"bet_{b}") for b in BET_OPTIONS]
     ])
 
-def repeat_bet_keyboard():
+def game_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="▶️ Повторить ставку", callback_data="repeat_bet"),
-            InlineKeyboardButton(text="✏️ Изменить ставку", callback_data="change_bet")
-        ]
+        [InlineKeyboardButton(text="🖐 HIT", callback_data="hit"),
+         InlineKeyboardButton(text="✋ STAND", callback_data="stand")]
     ])
 
-def game_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🖐 HIT", callback_data="hit"),
-            InlineKeyboardButton(text="✋ STAND", callback_data="stand")
-        ]
-    ])
-
-def stats_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Обратно к игре", callback_data="back_to_menu")]
-    ])
-
-# ====== /START ======
+# ====== ХЕНДЛЕРЫ ======
 @dp.message(Command("start"))
-async def start(message: types.Message):
-    user = load_player(message.from_user.id)
+async def cmd_start(message: types.Message):
+    p = await get_player(message.from_user.id)
     await message.answer(
-        "🃏 *Blackjack*\n\n"
-        "Классические правила.\n"
-        "Blackjack платит 3:2.\n\n"
-        f"💰 Баланс: {user['balance']}",
-        parse_mode="Markdown",
-        reply_markup=main_menu_keyboard()
+        f"🃏 *Blackjack*\nБаланс: {p['balance']}", 
+        parse_mode="Markdown", reply_markup=main_menu_kb()
     )
 
-# ====== ИГРА ======
 @dp.callback_query(lambda c: c.data == "play")
-async def play(call: CallbackQuery):
-    user = load_player(call.from_user.id)
-    if user["last_bet"]:
-        text = (
-            f"💰 Текущая ставка: {user['last_bet']}\n"
-            f"💰 Баланс: {user['balance']}"
-        )
-        await call.message.edit_text(text, reply_markup=repeat_bet_keyboard())
-    else:
-        await call.message.edit_text(
-            f"💰 Баланс: {user['balance']}\nВыбери ставку:",
-            reply_markup=bet_keyboard()
-        )
+async def cb_play(call: CallbackQuery):
+    p = await get_player(call.from_user.id)
+    await call.message.edit_text(f"Баланс: {p['balance']}\nСтавка:", reply_markup=bet_kb())
+
+@dp.callback_query(lambda c: c.data == "stats")
+async def cb_stats(call: CallbackQuery):
+    p = await get_player(call.from_user.id)
+    s = p['stats']
+    await call.message.edit_text(
+        f"📊 *Статистика*\nИгр: {s['games']}\nПобед: {s['wins']}\nМакс: {s['max_balance']}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="menu")]])
+    )
+
+@dp.callback_query(lambda c: c.data == "menu")
+async def cb_menu(call: CallbackQuery):
+    p = await get_player(call.from_user.id)
+    await call.message.edit_text(f"Баланс: {p['balance']}", reply_markup=main_menu_kb())
 
 @dp.callback_query(lambda c: c.data.startswith("bet_"))
-async def set_bet(call: CallbackQuery):
+async def cb_bet(call: CallbackQuery):
     bet = int(call.data.split("_")[1])
-    user = load_player(call.from_user.id)
-    if bet > user["balance"]:
-        await call.answer("Недостаточно фишек 😬", show_alert=True)
-        return
-    user["bet"] = bet
-    user["last_bet"] = bet
-    await start_round(call)
+    uid = call.from_user.id
+    p = await get_player(uid)
+    
+    if p['balance'] < bet:
+        return await call.answer("Мало фишек!", show_alert=True)
+    
+    # Начинаем игру (в памяти)
+    active_games[uid] = {
+        "bet": bet,
+        "player": [random_card(), random_card()],
+        "dealer": [random_card(), random_card()]
+    }
+    
+    g = active_games[uid]
+    txt = f"💰 Ставка: {bet}\n🤵 Дилер: {g['dealer'][0][0]}{g['dealer'][0][1]} ❓\n🧑 Ты: {render_hand(g['player'])} ({hand_value(g['player'])})"
+    await call.message.edit_text(txt, reply_markup=game_kb())
 
-@dp.callback_query(lambda c: c.data == "repeat_bet")
-async def repeat_bet(call: CallbackQuery):
-    user = load_player(call.from_user.id)
-    user["bet"] = user["last_bet"]
-    await start_round(call)
+    if hand_value(g['player']) == 21:
+        await finish_game(call, blackjack=True)
 
-@dp.callback_query(lambda c: c.data == "change_bet")
-async def change_bet(call: CallbackQuery):
-    user = load_player(call.from_user.id)
-    await call.message.edit_text(
-        f"💰 Баланс: {user['balance']}\nВыбери новую ставку:",
-        reply_markup=bet_keyboard()
-    )
-
-async def start_round(call: CallbackQuery):
-    user = load_player(call.from_user.id)
-    user["in_game"] = True
-    user["player"] = [random_card(), random_card()]
-    user["dealer"] = [random_card(), random_card()]
-
-    text = (
-        f"🧑 Ты: {render_hand(user['player'])} ({hand_value(user['player'])})\n"
-        f"🤵 Дилер: {user['dealer'][0][0]}{user['dealer'][0][1]} ❓\n"
-        f"💰 Баланс: {user['balance']}\n"
-        f"💰 Ставка: {user['bet']}"
-    )
-    await call.message.edit_text(text, reply_markup=game_keyboard())
-
-    if hand_value(user["player"]) == 21 and len(user["player"]) == 2:
-        await finish_round(call, blackjack=True)
-
-# ====== ХОДЫ ======
 @dp.callback_query(lambda c: c.data == "hit")
-async def hit(call: CallbackQuery):
-    user = load_player(call.from_user.id)
-    user["player"].append(random_card())
-    if hand_value(user["player"]) > 21:
-        await finish_round(call, lose=True)
+async def cb_hit(call: CallbackQuery):
+    uid = call.from_user.id
+    if uid not in active_games: return
+    g = active_games[uid]
+    g['player'].append(random_card())
+    
+    val = hand_value(g['player'])
+    if val > 21:
+        await finish_game(call, lose=True)
     else:
-        text = (
-            f"🧑 Ты: {render_hand(user['player'])} ({hand_value(user['player'])})\n"
-            f"🤵 Дилер: {user['dealer'][0][0]}{user['dealer'][0][1]} ❓\n"
-            f"💰 Баланс: {user['balance']}\n"
-            f"💰 Ставка: {user['bet']}"
-        )
-        await call.message.edit_text(text, reply_markup=game_keyboard())
+        txt = f"💰 Ставка: {g['bet']}\n🤵 Дилер: {g['dealer'][0][0]}{g['dealer'][0][1]} ❓\n🧑 Ты: {render_hand(g['player'])} ({val})"
+        await call.message.edit_text(txt, reply_markup=game_kb())
 
 @dp.callback_query(lambda c: c.data == "stand")
-async def stand(call: CallbackQuery):
-    user = load_player(call.from_user.id)
-    while hand_value(user["dealer"]) < 17:
-        user["dealer"].append(random_card())
-    await finish_round(call)
+async def cb_stand(call: CallbackQuery):
+    uid = call.from_user.id
+    if uid not in active_games: return
+    g = active_games[uid]
+    
+    while hand_value(g['dealer']) < 17:
+        g['dealer'].append(random_card())
+    
+    await finish_game(call)
 
-# ====== КОНЕЦ РАУНДА ======
-async def finish_round(call: CallbackQuery, blackjack=False, lose=False):
-    user = load_player(call.from_user.id)
-    bet = user["bet"]
-    stats = user["stats"]
-    player_val = hand_value(user["player"])
-    dealer_val = hand_value(user["dealer"])
-    stats["games"] += 1
-
-    if blackjack:
-        win = int(bet * 1.5)
-        user["balance"] += win
-        stats["wins"] += 1
-        stats["blackjacks"] += 1
-        result = f"🃏 BLACKJACK! Ты выиграл {win}"
-    elif player_val > 21:
-        user["balance"] -= bet
-        stats["losses"] += 1
-        result = "❌ Перебор! Ты проиграл"
-    elif dealer_val > 21 or player_val > dealer_val:
-        user["balance"] += bet
-        stats["wins"] += 1
-        result = f"✅ Ты выиграл {bet}"
-    elif player_val < dealer_val:
-        user["balance"] -= bet
-        stats["losses"] += 1
-        result = "❌ Ты проиграл"
+async def finish_game(call, blackjack=False, lose=False):
+    uid = call.from_user.id
+    g = active_games.pop(uid)
+    p = await get_player(uid) # свежие данные из БД
+    
+    bet = g['bet']
+    p_val = hand_value(g['player'])
+    d_val = hand_value(g['dealer'])
+    
+    win_amount = 0
+    res = "Ничья"
+    
+    # Логика
+    if lose or (not blackjack and p_val > 21):
+        res = "❌ Перебор/Проигрыш"
+        win_amount = -bet
+        p['stats']['losses'] += 1
+    elif blackjack:
+        res = "🃏 BLACKJACK!"
+        win_amount = int(bet * 1.5)
+        p['stats']['wins'] += 1
+        p['stats']['blackjacks'] += 1
+    elif d_val > 21 or p_val > d_val:
+        res = "✅ Победа!"
+        win_amount = bet
+        p['stats']['wins'] += 1
+    elif p_val < d_val:
+        res = "❌ Дилер выиграл"
+        win_amount = -bet
+        p['stats']['losses'] += 1
     else:
-        stats["pushes"] += 1
-        result = "🤝 Ничья"
+        res = "🤝 Ничья"
+        p['stats']['pushes'] += 1
 
-    stats["max_balance"] = max(stats["max_balance"], user["balance"])
-    user["in_game"] = False
-    user["bet"] = None
-
-    save_player(call.from_user.id)
-
-    text = (
-        f"{result}\n\n"
-        f"🧑 Ты: {render_hand(user['player'])} ({player_val})\n"
-        f"🤵 Дилер: {render_hand(user['dealer'])} ({dealer_val})\n\n"
-        f"💰 Баланс: {user['balance']}"
+    # Обновляем баланс
+    new_bal = p['balance'] + win_amount
+    p['stats']['games'] += 1
+    p['stats']['max_balance'] = max(p['stats']['max_balance'], new_bal)
+    
+    # Сохраняем в БД
+    await update_player_db(uid, new_bal, p['stats'])
+    
+    txt = (
+        f"{res} ({win_amount:+})\n"
+        f"🧑 {render_hand(g['player'])} ({p_val})\n"
+        f"🤵 {render_hand(g['dealer'])} ({d_val})\n"
+        f"💰 Баланс: {new_bal}"
     )
-    await call.message.edit_text(text, reply_markup=main_menu_keyboard())
-
-# ====== СТАТИСТИКА ======
-@dp.callback_query(lambda c: c.data == "show_stats")
-async def show_stats(call: CallbackQuery):
-    user = load_player(call.from_user.id)
-    s = user["stats"]
-    bal = user["balance"]
-    await call.message.edit_text(
-        "📊 *Твоя статистика*\n\n"
-        f"🎲 Игр: {s['games']}\n"
-        f"✅ Побед: {s['wins']}\n"
-        f"❌ Поражений: {s['losses']}\n"
-        f"🤝 Ничьих: {s['pushes']}\n"
-        f"🃏 Blackjack: {s['blackjacks']}\n\n"
-        f"💰 Баланс: {bal}\n"
-        f"🏆 Максимум: {s['max_balance']}",
-        parse_mode="Markdown",
-        reply_markup=stats_keyboard()
-    )
-
-@dp.callback_query(lambda c: c.data == "back_to_menu")
-async def back_to_menu(call: CallbackQuery):
-    user = load_player(call.from_user.id)
-    await call.message.edit_text(
-        f"💰 Баланс: {user['balance']}",
-        reply_markup=main_menu_keyboard()
-    )
+    await call.message.edit_text(txt, reply_markup=main_menu_kb())
 
 # ====== ЗАПУСК ======
 async def main():
+    await init_db() # Подключение к БД
     print("Bot started")
     await dp.start_polling(bot)
 
