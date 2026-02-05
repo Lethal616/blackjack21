@@ -158,7 +158,6 @@ class GameTable:
         return None
 
     def start_game(self):
-        # Очищаем карты дилера и игроков, но НЕ трогаем self.deck
         self.dealer_hand = []
         self.shuffle_alert = False
         
@@ -171,7 +170,7 @@ class GameTable:
         self.dealer_hand.append(c)
 
         for p in self.players:
-            p.bet = p.original_bet # СБРОС СТАВКИ К ОРИГИНАЛЬНОЙ
+            p.bet = p.original_bet 
             p.hand = []
             p.status = "playing"
             c1, s1 = self.deck.get_card()
@@ -272,8 +271,6 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
     shuffle_note = "\n\n_🔄 Колода перемешана_" if table.shuffle_alert else ""
     
     res_text = ""
-    
-    # ПОЛУЧАЕМ БАЛАНС ИГРОКА ДЛЯ ОТОБРАЖЕНИЯ
     p_data = await get_player_data(player.user_id)
     balance_display = f"\n🪙 Баланс: *{p_data['balance']}*"
     
@@ -305,25 +302,17 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
              
         res_text += f" ({win:+})"
         
-        # В случае конца игры, показываем баланс уже с учетом выигрыша/проигрыша
-        # Так как finalize_game_db вызывается ДО обновления сообщения, в БД уже лежит новый баланс
-        # Но чтобы быть уверенным, что мы показываем то, что в базе:
-        # Мы уже вызвали get_player_data выше. Если finalize уже прошел, там новый баланс.
-        # Если render вызывается до finalize (внутри process_turns), то старый.
-        # Для UI "Game Over" finalize обычно уже вызван в контроллере.
-        
     text = (
         f"{dealer_str}\n"
         f"{players_str}\n"
         f"{shoe}{shuffle_note}"
         f"{res_text}"
-        f"{balance_display}" # <-- Добавлено отображение баланса
+        f"{balance_display}"
     )
     return text
 
 def get_game_kb(table: GameTable, player: TablePlayer):
     if table.state == "finished":
-        # Если это соло стол - даем реплей
         if not table.is_public:
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"replay_{table.id}")],
@@ -497,47 +486,58 @@ async def cb_replay(call: CallbackQuery):
     tid = call.data.split("_")[1]
     table = tables.get(tid)
     
-    # Если стол пропал (бот перезагружен) - кидаем в меню
     if not table:
          await call.answer("Сессия истекла", show_alert=True)
          return await cb_play_solo(call)
     
-    # Берем игрока (в соло он один)
     p = table.players[0]
     
-    # Проверка баланса перед новым раундом (по ОРИГИНАЛЬНОЙ ставке)
     data = await get_player_data(p.user_id)
     if data['balance'] < p.original_bet: 
         await call.answer("Недостаточно средств!", show_alert=True)
         return
     
-    # Запускаем новый раунд на ТОМ ЖЕ столе (сохраняем колоду)
     table.start_game()
-    
-    # Обновляем UI
     await update_table_messages(tid)
     
-    # Если вдруг снова сразу конец (BJ)
     if table.state == "finished":
         await finalize_game_db(table)
         await update_table_messages(tid)
 
-# -- МУЛЬТИПЛЕЕР: МЕНЮ --
-@dp.callback_query(lambda c: c.data == "play_multi")
+# -- МУЛЬТИПЛЕЕР: СПИСОК СТОЛОВ --
+@dp.callback_query(lambda c: c.data == "play_multi" or c.data == "refresh_multi")
 async def cb_play_multi(call: CallbackQuery):
+    # Фильтруем публичные столы, которые ждут игроков
     waiting_tables = [t for t in tables.values() if t.is_public and t.state == "waiting"]
     
     kb = []
-    # Теперь мы присоединяемся без знания ставки (ставку выберем сами)
-    for t in waiting_tables[:4]: 
+    # Показываем столы с именем владельца
+    for t in waiting_tables[:5]: 
+        owner_name = t.players[0].name if t.players else "Неизвестно"
         players_cnt = len(t.players)
-        btn_text = f"Стол #{t.id} | {players_cnt}/{MAX_PLAYERS}"
+        # Пример кнопки: "👤 Ivan | 👥 1/3"
+        btn_text = f"👤 {owner_name} | 👥 {players_cnt}/{MAX_PLAYERS}"
         kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"prejoin_{t.id}")])
     
+    if not waiting_tables:
+         kb.append([InlineKeyboardButton(text="📭 Нет активных столов", callback_data="noop")])
+
     kb.append([InlineKeyboardButton(text="➕ Создать стол", callback_data="create_table_setup")])
+    kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_multi")]) # Кнопка обновления
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="menu")])
     
-    await call.message.edit_text("👥 *Онлайн Лобби*\nВыбирай стол или создай свой:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    text = "👥 *Онлайн Лобби*\nНажмите на стол, чтобы присоединиться:"
+    
+    # Чтобы не было ошибки "Message is not modified" при обновлении
+    if call.data == "refresh_multi":
+         try: await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+         except TelegramBadRequest: await call.answer("Список актуален")
+    else:
+         await call.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(lambda c: c.data == "noop")
+async def cb_noop(call: CallbackQuery):
+    await call.answer("В данный момент нет открытых столов. Создайте свой!")
 
 # -- 1. Создание стола (выбор своей ставки) --
 @dp.callback_query(lambda c: c.data == "create_table_setup")
@@ -569,11 +569,11 @@ async def cb_prejoin(call: CallbackQuery):
     tid = call.data.split("_")[1]
     table = tables.get(tid)
     if not table or table.state != "waiting":
-        return await call.answer("Стол недоступен", show_alert=True)
+        return await call.answer("Стол недоступен (игра началась или удален)", show_alert=True)
     if len(table.players) >= MAX_PLAYERS:
         return await call.answer("Стол полон", show_alert=True)
     if table.get_player(call.from_user.id):
-        return await call.answer("Вы уже там")
+        return await call.answer("Вы уже за этим столом")
 
     # Предлагаем выбрать ставку для ЭТОГО стола
     kb = [[InlineKeyboardButton(text=f"💰 {b}", callback_data=f"joinbet_{tid}_{b}")] for b in BET_OPTIONS]
