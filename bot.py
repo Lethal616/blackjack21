@@ -158,6 +158,7 @@ class GameTable:
         return None
 
     def start_game(self):
+        # Очищаем карты дилера и игроков, но НЕ трогаем self.deck
         self.dealer_hand = []
         self.shuffle_alert = False
         
@@ -307,14 +308,13 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
 
 def get_game_kb(table: GameTable, player: TablePlayer):
     if table.state == "finished":
-        # Если это соло стол - даем реплей
+        # Исправление: Передаем TABLE ID вместо ставки
         if not table.is_public:
             return InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"replay_{player.original_bet}")],
+                [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"replay_{table.id}")],
                 [InlineKeyboardButton(text="🚪 Меню", callback_data="menu")]
             ])
         else:
-            # Для мультиплеера сложнее с реплеем, пока просто выход
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🚪 Выйти в меню", callback_data="menu")]
             ])
@@ -476,21 +476,33 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
     except:
         await message.answer("Ошибка. Введите целое число > 0")
 
+# ИСПРАВЛЕННАЯ ЛОГИКА REPLAY: Используем старый стол
 @dp.callback_query(lambda c: c.data.startswith("replay_"))
 async def cb_replay(call: CallbackQuery):
-    parts = call.data.split("_")
-    bet = int(parts[1])
-    data = await get_player_data(call.from_user.id)
-    if data['balance'] < bet: return await call.answer("Мало денег!", show_alert=True)
-    tid = str(uuid.uuid4())[:8]
-    table = GameTable(tid, is_public=False, owner_id=call.from_user.id)
-    tables[tid] = table
-    p = table.add_player(call.from_user.id, call.from_user.first_name, bet)
+    tid = call.data.split("_")[1]
+    table = tables.get(tid)
+    
+    # Если стол пропал (бот перезагружен) - кидаем в меню
+    if not table:
+         await call.answer("Сессия истекла", show_alert=True)
+         return await cb_play_solo(call)
+    
+    # Берем игрока (в соло он один)
+    p = table.players[0]
+    
+    # Проверка баланса перед новым раундом
+    data = await get_player_data(p.user_id)
+    if data['balance'] < p.bet:
+        await call.answer("Недостаточно средств!", show_alert=True)
+        return
+    
+    # Запускаем новый раунд на ТОМ ЖЕ столе (сохраняем колоду)
     table.start_game()
-    txt = await render_table_for_player(table, p, bot)
-    kb = get_game_kb(table, p)
-    msg = await call.message.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
-    p.message_id = msg.message_id
+    
+    # Обновляем UI
+    await update_table_messages(tid)
+    
+    # Если вдруг снова сразу конец (BJ)
     if table.state == "finished":
         await finalize_game_db(table)
         await update_table_messages(tid)
