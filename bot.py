@@ -115,7 +115,8 @@ class TablePlayer:
         self.bet = bet
         self.original_bet = bet
         self.hand = []
-        self.status = "waiting" # waiting (lobby), playing, stand, bust, blackjack
+        self.status = "waiting" # waiting, playing, stand, bust, blackjack
+        self.is_ready = False # Флаг готовности
         self.message_id = None 
 
     @property
@@ -150,12 +151,31 @@ class GameTable:
 
     def remove_player(self, user_id):
         self.players = [p for p in self.players if p.user_id != user_id]
+        # Если ушел владелец, передаем права следующему
+        if user_id == self.owner_id:
+            if self.players:
+                self.owner_id = self.players[0].user_id
+            else:
+                self.owner_id = None # Стол пуст, будет удален
 
     def get_player(self, user_id):
         for p in self.players:
             if p.user_id == user_id:
                 return p
         return None
+    
+    def check_all_ready(self):
+        if not self.players: return False
+        return all(p.is_ready for p in self.players)
+
+    def reset_round(self):
+        # Возвращаем стол в лобби для новой раздачи
+        self.state = "waiting"
+        self.dealer_hand = []
+        for p in self.players:
+            p.hand = []
+            p.is_ready = False # Сбрасываем готовность
+            p.status = "waiting"
 
     def start_game(self):
         self.dealer_hand = []
@@ -217,27 +237,30 @@ tables = {}
 # ====== ВИЗУАЛИЗАЦИЯ ======
 
 def render_lobby(table: GameTable):
-    txt = f"🎲 *Стол #{table.id}*\n"
+    txt = f"🎲 *Стол #{table.id}* (Ожидание)\n"
     txt += f"👥 Игроков: {len(table.players)}/{MAX_PLAYERS}\n\n"
     
     for i, p in enumerate(table.players, 1):
         role = "👑" if p.user_id == table.owner_id else "👤"
-        txt += f"{i}. {role} {p.name} — *{p.bet}* 🪙\n"
+        status = "✅ Готов" if p.is_ready else "⏳ Ждем..."
+        txt += f"{i}. {role} {p.name} — *{p.bet}* 🪙 ({status})\n"
     
-    for i in range(len(table.players) + 1, MAX_PLAYERS + 1):
-        txt += f"{i}. _Пусто_\n"
-        
     return txt
 
 def get_lobby_kb(table: GameTable, user_id):
     kb = []
-    if user_id == table.owner_id:
-        if len(table.players) >= 1: 
-            kb.append([InlineKeyboardButton(text="✅ Начать игру", callback_data=f"start_lobby_{table.id}")])
-        kb.append([InlineKeyboardButton(text="❌ Закрыть стол", callback_data=f"close_lobby_{table.id}")])
+    p = table.get_player(user_id)
+    
+    if not p.is_ready:
+        kb.append([InlineKeyboardButton(text="✅ Я ГОТОВ", callback_data=f"ready_{table.id}")])
     else:
-        kb.append([InlineKeyboardButton(text="🚪 Выйти", callback_data=f"leave_lobby_{table.id}")])
-        
+        # Если готов, можно отменить готовность (по желанию, но пока оставим просто выход)
+        pass
+
+    # Кнопка старта для владельца (если вдруг нужно принудительно, но лучше автостарт)
+    # Сделаем автостарт, когда все готовы.
+    
+    kb.append([InlineKeyboardButton(text="🚪 Выйти", callback_data=f"leave_lobby_{table.id}")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bot):
@@ -314,13 +337,16 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
 def get_game_kb(table: GameTable, player: TablePlayer):
     if table.state == "finished":
         if not table.is_public:
+            # Соло
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"replay_{table.id}")],
                 [InlineKeyboardButton(text="🚪 Меню", callback_data="menu")]
             ])
         else:
+            # Мультиплеер - кнопки продолжения
             return InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🚪 Выйти в меню", callback_data="menu")]
+                [InlineKeyboardButton(text="✅ Продолжить", callback_data=f"rematch_{table.id}")],
+                [InlineKeyboardButton(text="🚪 Выйти", callback_data=f"leave_lobby_{table.id}")]
             ])
 
     current_p = table.players[table.current_player_index]
@@ -340,6 +366,11 @@ def get_game_kb(table: GameTable, player: TablePlayer):
 async def update_table_messages(table_id):
     table = tables.get(table_id)
     if not table: return
+
+    # Проверка на удаление стола (если все вышли)
+    if not table.players:
+        del tables[table_id]
+        return
 
     if table.state == "waiting":
         txt = render_lobby(table)
@@ -480,7 +511,7 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
     except:
         await message.answer("Ошибка. Введите целое число > 0")
 
-# ИСПРАВЛЕННАЯ ЛОГИКА REPLAY: Используем старый стол
+# ЛОГИКА REPLAY СОЛО
 @dp.callback_query(lambda c: c.data.startswith("replay_"))
 async def cb_replay(call: CallbackQuery):
     tid = call.data.split("_")[1]
@@ -515,7 +546,6 @@ async def cb_play_multi(call: CallbackQuery):
     for t in waiting_tables[:5]: 
         owner_name = t.players[0].name if t.players else "Неизвестно"
         players_cnt = len(t.players)
-        # Пример кнопки: "👤 Ivan | 👥 1/3"
         btn_text = f"👤 {owner_name} | 👥 {players_cnt}/{MAX_PLAYERS}"
         kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"prejoin_{t.id}")])
     
@@ -523,12 +553,11 @@ async def cb_play_multi(call: CallbackQuery):
          kb.append([InlineKeyboardButton(text="📭 Нет активных столов", callback_data="noop")])
 
     kb.append([InlineKeyboardButton(text="➕ Создать стол", callback_data="create_table_setup")])
-    kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_multi")]) # Кнопка обновления
+    kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_multi")]) 
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="menu")])
     
     text = "👥 *Онлайн Лобби*\nНажмите на стол, чтобы присоединиться:"
     
-    # Чтобы не было ошибки "Message is not modified" при обновлении
     if call.data == "refresh_multi":
          try: await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
          except TelegramBadRequest: await call.answer("Список актуален")
@@ -539,7 +568,7 @@ async def cb_play_multi(call: CallbackQuery):
 async def cb_noop(call: CallbackQuery):
     await call.answer("В данный момент нет открытых столов. Создайте свой!")
 
-# -- 1. Создание стола (выбор своей ставки) --
+# -- 1. Создание стола --
 @dp.callback_query(lambda c: c.data == "create_table_setup")
 async def cb_create_setup(call: CallbackQuery):
     kb = [[InlineKeyboardButton(text=f"💰 {b}", callback_data=f"new_multi_{b}")] for b in BET_OPTIONS]
@@ -563,27 +592,26 @@ async def cb_new_multi_created(call: CallbackQuery):
     msg = await call.message.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
     p.message_id = msg.message_id
 
-# -- 2. Присоединение к столу (Шаг 1: Выбор ставки) --
+# -- 2. Присоединение к столу --
 @dp.callback_query(lambda c: c.data.startswith("prejoin_"))
 async def cb_prejoin(call: CallbackQuery):
     tid = call.data.split("_")[1]
     table = tables.get(tid)
     if not table or table.state != "waiting":
-        return await call.answer("Стол недоступен (игра началась или удален)", show_alert=True)
+        return await call.answer("Стол недоступен", show_alert=True)
     if len(table.players) >= MAX_PLAYERS:
         return await call.answer("Стол полон", show_alert=True)
     if table.get_player(call.from_user.id):
         return await call.answer("Вы уже за этим столом")
 
-    # Предлагаем выбрать ставку для ЭТОГО стола
     kb = [[InlineKeyboardButton(text=f"💰 {b}", callback_data=f"joinbet_{tid}_{b}")] for b in BET_OPTIONS]
     kb.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="play_multi")])
     await call.message.edit_text(f"Вы входите за стол #{tid}.\nВаша ставка?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# -- 3. Присоединение к столу (Шаг 2: Вход) --
+# -- 3. Присоединение к столу (Вход) --
 @dp.callback_query(lambda c: c.data.startswith("joinbet_"))
 async def cb_join_confirm(call: CallbackQuery):
-    parts = call.data.split("_") # joinbet_TID_BET
+    parts = call.data.split("_") 
     tid = parts[1]
     bet = int(parts[2])
     
@@ -595,13 +623,69 @@ async def cb_join_confirm(call: CallbackQuery):
     if data['balance'] < bet:
         return await call.answer("Не хватает денег!", show_alert=True)
 
-    # Входим
     p = table.add_player(call.from_user.id, call.from_user.first_name, bet)
     
     txt = render_lobby(table)
     kb = get_lobby_kb(table, p.user_id)
     msg = await call.message.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
     p.message_id = msg.message_id
+    
+    await update_table_messages(tid)
+
+# -- ГОТОВНОСТЬ (READY) --
+@dp.callback_query(lambda c: c.data.startswith("ready_"))
+async def cb_ready(call: CallbackQuery):
+    tid = call.data.split("_")[1]
+    table = tables.get(tid)
+    if not table: return await call.answer("Стол не найден")
+    
+    p = table.get_player(call.from_user.id)
+    if not p: return
+    
+    p.is_ready = True
+    await call.answer("Вы готовы!")
+    
+    # Если все готовы - старт
+    if table.check_all_ready():
+        table.start_game()
+        await update_table_messages(tid)
+        if table.state == "finished":
+            await finalize_game_db(table)
+            await update_table_messages(tid)
+    else:
+        # Просто обновляем статус в лобби
+        await update_table_messages(tid)
+
+# -- РЕВАНШ (REMATCH) В МУЛЬТИПЛЕЕРЕ --
+@dp.callback_query(lambda c: c.data.startswith("rematch_"))
+async def cb_rematch(call: CallbackQuery):
+    tid = call.data.split("_")[1]
+    table = tables.get(tid)
+    if not table: return await cb_play_multi(call)
+    
+    p = table.get_player(call.from_user.id)
+    
+    # Проверка баланса
+    data = await get_player_data(call.from_user.id)
+    if data['balance'] < p.original_bet:
+        await call.answer("Недостаточно средств для продолжения!", show_alert=True)
+        return
+
+    # Если стол в статусе finished, переводим его в waiting (лобби)
+    # НО! Нужно делать это аккуратно. Если один нажал "Да", а другие думают.
+    
+    if table.state == "finished":
+        table.reset_round() # Сбрасываем карты, переводим в waiting
+    
+    # Ставим игрока в ready (или ждем, пока он нажмет ready в лобби - давай сразу ready для удобства?)
+    # Лучше кинуть в лобби, чтобы он видел других.
+    
+    # Отправляем сообщение лобби
+    txt = render_lobby(table)
+    kb = get_lobby_kb(table, p.user_id)
+    try:
+        await bot.edit_message_text(txt, chat_id=p.user_id, message_id=p.message_id, reply_markup=kb, parse_mode="Markdown")
+    except: pass
     
     await update_table_messages(tid)
 
@@ -625,19 +709,6 @@ async def cb_close_lobby(call: CallbackQuery):
                  except: pass
         del tables[tid]
     await cb_play_multi(call)
-
-@dp.callback_query(lambda c: c.data.startswith("start_lobby_"))
-async def cb_start_lobby(call: CallbackQuery):
-    tid = call.data.split("_")[2]
-    table = tables.get(tid)
-    if not table: return
-    if table.owner_id != call.from_user.id: return
-    
-    table.start_game()
-    await update_table_messages(tid)
-    if table.state == "finished":
-        await finalize_game_db(table)
-        await update_table_messages(tid)
 
 # -- GAME ACTIONS --
 @dp.callback_query(lambda c: c.data.startswith("hit_"))
