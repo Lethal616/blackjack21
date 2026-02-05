@@ -171,7 +171,7 @@ class GameTable:
         self.dealer_hand.append(c)
 
         for p in self.players:
-            p.bet = p.original_bet # СБРОС СТАВКИ К ОРИГИНАЛЬНОЙ (FIX DOUBLE ISSUE)
+            p.bet = p.original_bet # СБРОС СТАВКИ К ОРИГИНАЛЬНОЙ
             p.hand = []
             p.status = "playing"
             c1, s1 = self.deck.get_card()
@@ -272,6 +272,11 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
     shuffle_note = "\n\n_🔄 Колода перемешана_" if table.shuffle_alert else ""
     
     res_text = ""
+    
+    # ПОЛУЧАЕМ БАЛАНС ИГРОКА ДЛЯ ОТОБРАЖЕНИЯ
+    p_data = await get_player_data(player.user_id)
+    balance_display = f"\n🪙 Баланс: *{p_data['balance']}*"
+    
     if table.state == "finished":
         d_val = table._hand_value(table.dealer_hand)
         win = 0
@@ -297,13 +302,22 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         else:
              res_text = "\n🤝 *Ничья*"
              win = 0
+             
         res_text += f" ({win:+})"
-
+        
+        # В случае конца игры, показываем баланс уже с учетом выигрыша/проигрыша
+        # Так как finalize_game_db вызывается ДО обновления сообщения, в БД уже лежит новый баланс
+        # Но чтобы быть уверенным, что мы показываем то, что в базе:
+        # Мы уже вызвали get_player_data выше. Если finalize уже прошел, там новый баланс.
+        # Если render вызывается до finalize (внутри process_turns), то старый.
+        # Для UI "Game Over" finalize обычно уже вызван в контроллере.
+        
     text = (
         f"{dealer_str}\n"
         f"{players_str}\n"
         f"{shoe}{shuffle_note}"
         f"{res_text}"
+        f"{balance_display}" # <-- Добавлено отображение баланса
     )
     return text
 
