@@ -29,7 +29,7 @@ TOTAL_CARDS = 52 * DECKS_COUNT
 RESHUFFLE_THRESHOLD = 60
 BET_OPTIONS = [50, 100, 250]
 MAX_PLAYERS = 3
-TURN_TIMEOUT = 30 # Секунд на ход (было 45)
+TURN_TIMEOUT = 30 # Секунд на ход
 
 # ====== БАЗА ДАННЫХ ======
 pool = None
@@ -258,18 +258,13 @@ async def check_timeouts_loop():
                         current_p = table.players[table.current_player_index]
                         current_p.status = "stand" # Принудительный Stand
                         
-                        # Уведомляем (можно в личку, но лучше обновлением стола)
-                        # Мы просто переходим к следующему
                         table.process_turns()
                         
-                        # Если игра завершилась из-за этого
                         if table.state == "finished":
                             await finalize_game_db(table)
                         
-                        # Обновляем всем сообщения
                         await update_table_messages(table.id)
                         
-                        # Пытаемся отправить уведомление тому, кто проспал
                         try: await bot.send_message(current_p.user_id, "⏳ Время хода вышло! Сработал авто-Stand.")
                         except: pass
                         
@@ -293,9 +288,12 @@ def get_lobby_kb(table: GameTable, user_id):
     kb = []
     p = table.get_player(user_id)
     
+    # Кнопка изменения ставки (доступна пока не готов)
     if not p.is_ready:
         kb.append([InlineKeyboardButton(text="✅ Я ГОТОВ", callback_data=f"ready_{table.id}")])
+        kb.append([InlineKeyboardButton(text="💰 Изм. ставку", callback_data=f"chbet_lobby_{table.id}")])
     else:
+        # Если готов - можно отменить готовность через смену ставки или выход
         pass
     
     kb.append([InlineKeyboardButton(text="🚪 Выйти", callback_data=f"leave_lobby_{table.id}")])
@@ -313,7 +311,7 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         marker = "⏳"
         if table.state == "player_turn":
             if table.players[table.current_player_index] == p:
-                marker = f"👈 *ХОДИТ* ({TURN_TIMEOUT}с)" # Динамически показываем таймер
+                marker = f"👈 *ХОДИТ* ({TURN_TIMEOUT}с)"
             elif table.players.index(p) > table.current_player_index:
                 marker = "💤"
             else:
@@ -680,7 +678,6 @@ async def cb_ready(call: CallbackQuery):
     p.is_ready = True
     await call.answer("Вы готовы!")
     
-    # Если все готовы - старт
     if table.check_all_ready():
         table.start_game()
         await update_table_messages(tid)
@@ -688,27 +685,60 @@ async def cb_ready(call: CallbackQuery):
             await finalize_game_db(table)
             await update_table_messages(tid)
     else:
-        # Просто обновляем статус в лобби
         await update_table_messages(tid)
 
-# -- РЕВАНШ (REMATCH) В МУЛЬТИПЛЕЕРЕ --
-@dp.callback_query(lambda c: c.data.startswith("rematch_"))
-async def cb_rematch(call: CallbackQuery):
-    tid = call.data.split("_")[1]
+# -- РЕВАНШ / СМЕНА СТАВКИ --
+@dp.callback_query(lambda c: c.data.startswith("rematch_") or c.data.startswith("chbet_lobby_"))
+async def cb_rematch_or_change(call: CallbackQuery):
+    # При нажатии "Продолжить" или "Изм. ставку" показываем меню выбора ставки
+    parts = call.data.split("_")
+    tid = parts[-1] # берем ID (rematch_ID или chbet_lobby_ID)
+    
     table = tables.get(tid)
     if not table: return await cb_play_multi(call)
     
     p = table.get_player(call.from_user.id)
+    if not p: return await cb_play_multi(call)
     
-    # Проверка баланса
-    data = await get_player_data(call.from_user.id)
-    if data['balance'] < p.original_bet:
-        await call.answer("Недостаточно средств для продолжения!", show_alert=True)
-        return
+    kb = []
+    # Кнопка "Оставить"
+    kb.append([InlineKeyboardButton(text=f"Оставить: {p.original_bet}", callback_data=f"m_rebet_{tid}_{p.original_bet}")])
+    # Стандартные опции
+    row = []
+    for b in BET_OPTIONS:
+         row.append(InlineKeyboardButton(text=f"{b}", callback_data=f"m_rebet_{tid}_{b}"))
+    kb.append(row)
+    
+    kb.append([InlineKeyboardButton(text="🔙 Отмена (Выйти)", callback_data=f"leave_lobby_{tid}")])
+    
+    await call.message.edit_text(f"💰 Ставка на следующий раунд?\n(Текущая: {p.original_bet})", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-    if table.state == "finished":
-        table.reset_round() 
+@dp.callback_query(lambda c: c.data.startswith("m_rebet_"))
+async def cb_multi_rebet(call: CallbackQuery):
+    parts = call.data.split("_")
+    tid = parts[2]
+    bet = int(parts[3])
     
+    table = tables.get(tid)
+    if not table: return await cb_play_multi(call)
+    
+    p = table.get_player(call.from_user.id)
+    if not p: return 
+    
+    data = await get_player_data(p.user_id)
+    if data['balance'] < bet:
+        return await call.answer("Не хватает денег!", show_alert=True)
+    
+    # Обновляем ставку
+    p.original_bet = bet
+    p.bet = bet
+    p.is_ready = False # Сбрасываем готовность, чтобы нажал Ready в лобби
+    
+    # Если стол был в конце игры, сбрасываем его в лобби
+    if table.state == "finished":
+        table.reset_round()
+        
+    # Возвращаем пользователя в отображение лобби
     txt = render_lobby(table)
     kb = get_lobby_kb(table, p.user_id)
     try:
@@ -716,6 +746,7 @@ async def cb_rematch(call: CallbackQuery):
     except: pass
     
     await update_table_messages(tid)
+
 
 @dp.callback_query(lambda c: c.data.startswith("leave_lobby_"))
 async def cb_leave_lobby(call: CallbackQuery):
