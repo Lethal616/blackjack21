@@ -30,6 +30,11 @@ BET_OPTIONS = [50, 100, 250]
 RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
 SUITS = ["♠️", "♥️", "♦️", "♣️"]
 
+# Настройки колоды (Казино)
+DECKS_COUNT = 5            # 5 колод
+TOTAL_CARDS = 52 * DECKS_COUNT # 260 карт
+RESHUFFLE_THRESHOLD = 60   # Перемешать, если осталось меньше 60 карт (подрезная карта)
+
 # ====== АСИНХРОННАЯ БАЗА (asyncpg) ======
 pool = None
 
@@ -83,11 +88,36 @@ async def update_player_db(user_id, balance, stats):
             WHERE user_id = $1
         """, user_id, balance, stats["games"], stats["wins"], stats["losses"], stats["pushes"], stats["blackjacks"], stats["max_balance"])
 
-# ====== ЛОГИКА ИГРЫ (InMemory кеш) ======
-active_games = {} # user_id -> dict
+# ====== ЛОГИКА КОЛОДЫ (SHOE) ======
+# user_id -> [список карт]
+user_shoes = {}
 
-def random_card():
-    return random.choice(RANKS), random.choice(SUITS)
+def create_shoe():
+    """Создает новую 'туфлю' из 5 колод и перемешивает"""
+    base_deck = [(r, s) for r in RANKS for s in SUITS]
+    shoe = base_deck * DECKS_COUNT
+    random.shuffle(shoe)
+    return shoe
+
+def get_card(user_id):
+    """Берет карту из колоды игрока. Если карт мало — мешает новую."""
+    if user_id not in user_shoes:
+        user_shoes[user_id] = create_shoe()
+    
+    shoe = user_shoes[user_id]
+    shuffled_msg = None
+
+    # Проверка "подрезной карты" (Penetration)
+    if len(shoe) < RESHUFFLE_THRESHOLD:
+        user_shoes[user_id] = create_shoe()
+        shoe = user_shoes[user_id]
+        shuffled_msg = "🔄 Колода перемешана"
+    
+    card = shoe.pop()
+    return card, shuffled_msg
+
+# ====== ЛОГИКА ИГРЫ ======
+active_games = {} # user_id -> dict
 
 def card_value(card):
     rank, _ = card
@@ -114,7 +144,6 @@ def main_menu_kb():
     ])
 
 def bet_kb():
-    # Добавляем кнопку "Своя ставка"
     kb = [[InlineKeyboardButton(text=f"💰 {b}", callback_data=f"bet_{b}")] for b in BET_OPTIONS]
     kb.append([InlineKeyboardButton(text="✍️ Своя ставка", callback_data="custom_bet")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
@@ -127,7 +156,6 @@ def game_kb():
 
 # ====== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ЗАПУСКА ======
 async def start_game_logic(user_id, bet, messageable):
-    """Запускает игру. messageable - это Message или CallbackQuery"""
     p = await get_player(user_id)
     
     if p['balance'] < bet:
@@ -139,31 +167,35 @@ async def start_game_logic(user_id, bet, messageable):
             await messageable.answer(text, reply_markup=bet_kb())
         return
 
-    # Инициализация игры
+    # Раздача карт с учетом колоды
+    c1, s1 = get_card(user_id)
+    c2, s2 = get_card(user_id)
+    d1, s3 = get_card(user_id)
+    d2, s4 = get_card(user_id)
+    
+    # Собираем сообщения о перемешивании (если было)
+    shuffles = [x for x in [s1, s2, s3, s4] if x]
+    shuffle_note = f"\n\n_{shuffles[0]}_" if shuffles else ""
+
     active_games[user_id] = {
         "bet": bet,
-        "player": [random_card(), random_card()],
-        "dealer": [random_card(), random_card()]
+        "player": [c1, c2],
+        "dealer": [d1, d2]
     }
     
     g = active_games[user_id]
     txt = (f"💰 Ставка: {bet}\n"
            f"🤵 Дилер: {g['dealer'][0][0]}{g['dealer'][0][1]} ❓\n"
-           f"🧑 Ты: {render_hand(g['player'])} ({hand_value(g['player'])})")
+           f"🧑 Ты: {render_hand(g['player'])} ({hand_value(g['player'])})"
+           f"{shuffle_note}")
 
-    # Отправка ответа
     if isinstance(messageable, types.CallbackQuery):
-        await messageable.message.edit_text(txt, reply_markup=game_kb())
+        await messageable.message.edit_text(txt, reply_markup=game_kb(), parse_mode="Markdown")
     else:
-        await messageable.answer(txt, reply_markup=game_kb())
+        await messageable.answer(txt, reply_markup=game_kb(), parse_mode="Markdown")
 
     if hand_value(g['player']) == 21:
-        # Для авто-блэкджека нужен объект вызова, создадим фиктивный или передадим контекст
-        # Упрощение: передаем user_id напрямую в finish_game, если надо
-        # Но finish_game ожидает call. Сделаем хак:
-        # В этой версии finish_game адаптируем под user_id
         await finish_game(user_id, messageable, blackjack=True)
-
 
 # ====== ХЕНДЛЕРЫ ======
 @dp.message(Command("start"))
@@ -188,7 +220,6 @@ async def cb_custom_bet(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("✍️ Введи сумму ставки (целое число):")
     await state.set_state(GameStates.waiting_for_bet)
 
-# Обработка ввода своей ставки
 @dp.message(GameStates.waiting_for_bet)
 async def process_custom_bet(message: types.Message, state: FSMContext):
     try:
@@ -228,16 +259,22 @@ async def cb_hit(call: CallbackQuery):
     uid = call.from_user.id
     if uid not in active_games: return
     g = active_games[uid]
-    g['player'].append(random_card())
     
+    # Берем карту из колоды
+    new_card, shuffle_msg = get_card(uid)
+    g['player'].append(new_card)
+    
+    shuffle_note = f"\n\n_{shuffle_msg}_" if shuffle_msg else ""
     val = hand_value(g['player'])
+    
     if val > 21:
         await finish_game(uid, call, lose=True)
     else:
         txt = (f"💰 Ставка: {g['bet']}\n"
                f"🤵 Дилер: {g['dealer'][0][0]}{g['dealer'][0][1]} ❓\n"
-               f"🧑 Ты: {render_hand(g['player'])} ({val})")
-        await call.message.edit_text(txt, reply_markup=game_kb())
+               f"🧑 Ты: {render_hand(g['player'])} ({val})"
+               f"{shuffle_note}")
+        await call.message.edit_text(txt, reply_markup=game_kb(), parse_mode="Markdown")
 
 @dp.callback_query(lambda c: c.data == "stand")
 async def cb_stand(call: CallbackQuery):
@@ -245,15 +282,16 @@ async def cb_stand(call: CallbackQuery):
     if uid not in active_games: return
     g = active_games[uid]
     
+    # Дилер добирает карты из колоды
+    shuffle_happened = False
     while hand_value(g['dealer']) < 17:
-        g['dealer'].append(random_card())
+        card, s_msg = get_card(uid)
+        g['dealer'].append(card)
+        if s_msg: shuffle_happened = True
     
-    await finish_game(uid, call)
+    await finish_game(uid, call, shuffle_alert=shuffle_happened)
 
-async def finish_game(user_id, messageable, blackjack=False, lose=False):
-    """
-    messageable: может быть CallbackQuery (если нажали кнопку) или Message (если авто-блэкджек при старте текстом)
-    """
+async def finish_game(user_id, messageable, blackjack=False, lose=False, shuffle_alert=False):
     if user_id not in active_games: return
     g = active_games.pop(user_id)
     p = await get_player(user_id)
@@ -292,19 +330,20 @@ async def finish_game(user_id, messageable, blackjack=False, lose=False):
     
     await update_player_db(user_id, new_bal, p['stats'])
     
+    shuffle_note = "\n\n_🔄 Колода перемешана_" if shuffle_alert else ""
+
     txt = (
         f"{res} ({win_amount:+})\n\n"
         f"🤵 Дилер: {render_hand(g['dealer'])} ({d_val})\n"
         f"🧑 Ты: {render_hand(g['player'])} ({p_val})\n\n"
         f"💰 Баланс: {new_bal}"
+        f"{shuffle_note}"
     )
     
-    # Отправка результата
     if isinstance(messageable, types.CallbackQuery):
-        await messageable.message.edit_text(txt, reply_markup=main_menu_kb())
+        await messageable.message.edit_text(txt, reply_markup=main_menu_kb(), parse_mode="Markdown")
     else:
-        # Если игра началась с текстовой команды (кастомная ставка) и сразу блэкджек
-        await messageable.answer(txt, reply_markup=main_menu_kb())
+        await messageable.answer(txt, reply_markup=main_menu_kb(), parse_mode="Markdown")
 
 # ====== ЗАПУСК ======
 async def main():
