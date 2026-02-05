@@ -677,10 +677,29 @@ async def cb_double(call: CallbackQuery):
 async def cb_stats(call: CallbackQuery):
     data = await get_player_data(call.from_user.id)
     s = data['stats']
-    total = s['games']
-    rate = round(s['wins']/total*100, 1) if total else 0
-    txt = (f"📊 *Статистика*\nGames: {total}\nWins: {s['wins']}\nWinRate: {rate}%\nMax Win: {s['max_win']}\n\n🆔 `{call.from_user.id}`")
-    await call.message.edit_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="menu")]]))
+    
+    total_games = s['games']
+    win_rate = round((s['wins'] / total_games * 100), 1) if total_games > 0 else 0
+    
+    stats_text = (
+        f"📊 *Личная статистика*\n\n"
+        f"🎮 Игры: *{s['games']}*\n"
+        f"🏆 Победы: *{s['wins']}*\n"
+        f"💀 Поражения: *{s['losses']}*\n"
+        f"🤝 Ничьи: *{s['pushes']}*\n"
+        f"🃏 Blackjack: *{s['blackjacks']}*\n"
+        f"📈 Win Rate: *{win_rate}%*\n\n"
+        f"🪙 Баланс: *{data['balance']}*\n"
+        f"🏦 Макс. баланс: *{s['max_balance']}*\n"
+        f"🤑 Макс. выигрыш: *{s['max_win']}*\n\n"
+        f"🆔 ID: `{call.from_user.id}`"
+    )
+    
+    await call.message.edit_text(
+        stats_text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]])
+    )
 
 async def main():
     await init_db()
