@@ -124,10 +124,10 @@ def get_card(user_id):
     card = shoe.pop()
     return card, shuffled_msg
 
-# ====== ВИЗУАЛ (НОВОЕ) ======
+# ====== ВИЗУАЛ (ОБНОВЛЕННЫЙ) ======
 def render_hand(hand):
-    # Теперь скобки ВНУТРИ backticks: `[ A♠️ ]`
-    return "  ".join(f"`[ {r}{s} ]`" for r, s in hand)
+    # Убрали скобки, оставили только `карту`
+    return "  ".join(f"`{r}{s}`" for r, s in hand)
 
 def get_shoe_visual(user_id):
     if user_id not in user_shoes:
@@ -212,8 +212,8 @@ async def start_game_logic(user_id, bet, messageable):
     
     g = active_games[user_id]
     
-    # Визуал дилера (скобки внутри)
-    dealer_show = f"`[ {g['dealer'][0][0]}{g['dealer'][0][1]} ]`  `[ ❓ ]`"
+    # Визуал дилера (без скобок)
+    dealer_show = f"`{g['dealer'][0][0]}{g['dealer'][0][1]}`  `❓`"
     shoe_bar = get_shoe_visual(user_id)
     
     txt = (f"💰 Ставка: *{bet}*\n\n"
@@ -328,7 +328,7 @@ async def cb_hit(call: CallbackQuery):
         await finish_game(uid, call, lose=True)
     else:
         # Визуал дилера
-        dealer_show = f"`[ {g['dealer'][0][0]}{g['dealer'][0][1]} ]`  `[ ❓ ]`"
+        dealer_show = f"`{g['dealer'][0][0]}{g['dealer'][0][1]}`  `❓`"
         
         txt = (f"💰 Ставка: *{g['bet']}*\n\n"
                f"🤵 Дилер:  {dealer_show}\n"
