@@ -210,13 +210,12 @@ async def start_game_logic(user_id, bet, messageable):
 
     active_games[user_id] = {
         "bet": bet,
-        "original_bet": bet, # Запоминаем исходную ставку
+        "original_bet": bet, 
         "player": [c1, c2],
         "dealer": [d1, d2]
     }
     
     g = active_games[user_id]
-    
     shoe_bar = get_shoe_visual(user_id)
     
     msg_entity = None
@@ -349,8 +348,24 @@ async def cb_hit(call: CallbackQuery):
     val = hand_value(g['player'])
     shoe_bar = get_shoe_visual(uid)
     
+    # 1. ПЕРЕБОР
     if val > 21:
         await finish_game(uid, call, lose=True)
+        
+    # 2. РОВНО 21 - АВТОМАТИЧЕСКИЙ STAND
+    elif val == 21:
+        # Логика дилера (копируем из cb_stand)
+        shuffle_happened = (shuffle_msg is not None)
+        while hand_value(g['dealer']) < 17:
+            card, s_msg = get_card(uid)
+            g['dealer'].append(card)
+            if s_msg: shuffle_happened = True
+        
+        # Отправляем уведомление, что набрали 21
+        await call.answer("21! Ход дилера...", show_alert=False)
+        await finish_game(uid, call, shuffle_alert=shuffle_happened)
+        
+    # 3. ИНАЧЕ - ПРОДОЛЖАЕМ
     else:
         dealer_show = f"`{g['dealer'][0][0]}{g['dealer'][0][1]}`  `❓`"
         
@@ -412,7 +427,7 @@ async def finish_game(user_id, messageable, blackjack=False, lose=False, shuffle
     p = await get_player(user_id)
     
     bet = g['bet']
-    original_bet = g.get('original_bet', bet) # <--- БЕРЕМ ИСХОДНУЮ
+    original_bet = g.get('original_bet', bet)
     
     p_val = hand_value(g['player'])
     d_val = hand_value(g['dealer'])
@@ -462,7 +477,6 @@ async def finish_game(user_id, messageable, blackjack=False, lose=False, shuffle
         f"{shuffle_note}"
     )
     
-    # ПЕРЕДАЕМ original_bet
     if isinstance(messageable, types.CallbackQuery):
         await messageable.message.edit_text(txt, reply_markup=game_over_kb(original_bet), parse_mode="Markdown")
     else:
