@@ -154,12 +154,18 @@ def game_kb():
          InlineKeyboardButton(text="✋ STAND", callback_data="stand")]
     ])
 
+def game_over_kb(bet):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"play_again_{bet}")],
+        [InlineKeyboardButton(text="💰 Изменить ставку", callback_data="play")]
+    ])
+
 # ====== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ЗАПУСКА ======
 async def start_game_logic(user_id, bet, messageable):
     p = await get_player(user_id)
     
     if p['balance'] < bet:
-        text = f"❌ Недостаточно фишек!\nТвой баланс: {p['balance']}\nСтавка: {bet}"
+        text = f"❌ Недостаточно фишек!\nТвой баланс: 🪙 {p['balance']}\nСтавка: {bet}"
         if isinstance(messageable, types.CallbackQuery):
             await messageable.answer("Недостаточно средств", show_alert=True)
             await messageable.message.edit_text(text, reply_markup=bet_kb())
@@ -206,14 +212,14 @@ async def cmd_start(message: types.Message, state: FSMContext):
         f"🃏 *Blackjack*\n"
         f"Доброе пожаловать!\n"
         f"Классические выплаты 3:2 при BJ!\n\n"
-        f"Баланс: {p['balance']}", 
+        f"🪙 Баланс: {p['balance']}", 
         parse_mode="Markdown", reply_markup=main_menu_kb()
     )
 
 @dp.callback_query(lambda c: c.data == "play")
 async def cb_play(call: CallbackQuery):
     p = await get_player(call.from_user.id)
-    await call.message.edit_text(f"Баланс: {p['balance']}\nСтавка:", reply_markup=bet_kb())
+    await call.message.edit_text(f"🪙 Баланс: {p['balance']}\nСтавка:", reply_markup=bet_kb())
 
 @dp.callback_query(lambda c: c.data == "custom_bet")
 async def cb_custom_bet(call: CallbackQuery, state: FSMContext):
@@ -239,6 +245,15 @@ async def cb_bet(call: CallbackQuery):
     bet = int(call.data.split("_")[1])
     await start_game_logic(call.from_user.id, bet, call)
 
+# Хендлер для кнопки "Играть еще"
+@dp.callback_query(lambda c: c.data.startswith("play_again_"))
+async def cb_play_again(call: CallbackQuery):
+    try:
+        bet = int(call.data.split("_")[2]) # play_again_100 -> берем 100
+        await start_game_logic(call.from_user.id, bet, call)
+    except (IndexError, ValueError):
+        await call.answer("Ошибка повтора ставки", show_alert=True)
+
 @dp.callback_query(lambda c: c.data == "stats")
 async def cb_stats(call: CallbackQuery):
     p = await get_player(call.from_user.id)
@@ -252,7 +267,7 @@ async def cb_stats(call: CallbackQuery):
 @dp.callback_query(lambda c: c.data == "menu")
 async def cb_menu(call: CallbackQuery):
     p = await get_player(call.from_user.id)
-    await call.message.edit_text(f"Баланс: {p['balance']}", reply_markup=main_menu_kb())
+    await call.message.edit_text(f"🪙 Баланс: {p['balance']}", reply_markup=main_menu_kb())
 
 @dp.callback_query(lambda c: c.data == "hit")
 async def cb_hit(call: CallbackQuery):
@@ -336,14 +351,14 @@ async def finish_game(user_id, messageable, blackjack=False, lose=False, shuffle
         f"{res} ({win_amount:+})\n\n"
         f"🤵 Дилер: {render_hand(g['dealer'])} ({d_val})\n"
         f"🧑 Ты: {render_hand(g['player'])} ({p_val})\n\n"
-        f"💰 Баланс: {new_bal}"
+        f"🪙 Баланс: {new_bal}"
         f"{shuffle_note}"
     )
     
     if isinstance(messageable, types.CallbackQuery):
-        await messageable.message.edit_text(txt, reply_markup=main_menu_kb(), parse_mode="Markdown")
+        await messageable.message.edit_text(txt, reply_markup=game_over_kb(bet), parse_mode="Markdown")
     else:
-        await messageable.answer(txt, reply_markup=main_menu_kb(), parse_mode="Markdown")
+        await messageable.answer(txt, reply_markup=game_over_kb(bet), parse_mode="Markdown")
 
 # ====== ЗАПУСК ======
 async def main():
