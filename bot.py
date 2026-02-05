@@ -125,8 +125,12 @@ def game_kb():
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     p = await get_player(message.from_user.id)
+    # Исправленное приветствие
     await message.answer(
-        f"🃏 *Blackjack*\nБаланс: {p['balance']}", 
+        f"🃏 *Blackjack*\n"
+        f"Доброе пожаловать!\n"
+        f"Классические выплаты 3:2 при BJ!\n\n"
+        f"Баланс: {p['balance']}", 
         parse_mode="Markdown", reply_markup=main_menu_kb()
     )
 
@@ -167,7 +171,10 @@ async def cb_bet(call: CallbackQuery):
     }
     
     g = active_games[uid]
-    txt = f"💰 Ставка: {bet}\n🤵 Дилер: {g['dealer'][0][0]}{g['dealer'][0][1]} ❓\n🧑 Ты: {render_hand(g['player'])} ({hand_value(g['player'])})"
+    # Порядок: Дилер -> Ты
+    txt = (f"💰 Ставка: {bet}\n"
+           f"🤵 Дилер: {g['dealer'][0][0]}{g['dealer'][0][1]} ❓\n"
+           f"🧑 Ты: {render_hand(g['player'])} ({hand_value(g['player'])})")
     await call.message.edit_text(txt, reply_markup=game_kb())
 
     if hand_value(g['player']) == 21:
@@ -184,7 +191,10 @@ async def cb_hit(call: CallbackQuery):
     if val > 21:
         await finish_game(call, lose=True)
     else:
-        txt = f"💰 Ставка: {g['bet']}\n🤵 Дилер: {g['dealer'][0][0]}{g['dealer'][0][1]} ❓\n🧑 Ты: {render_hand(g['player'])} ({val})"
+        # Порядок: Дилер -> Ты
+        txt = (f"💰 Ставка: {g['bet']}\n"
+               f"🤵 Дилер: {g['dealer'][0][0]}{g['dealer'][0][1]} ❓\n"
+               f"🧑 Ты: {render_hand(g['player'])} ({val})")
         await call.message.edit_text(txt, reply_markup=game_kb())
 
 @dp.callback_query(lambda c: c.data == "stand")
@@ -240,10 +250,11 @@ async def finish_game(call, blackjack=False, lose=False):
     # Сохраняем в БД
     await update_player_db(uid, new_bal, p['stats'])
     
+    # Исправленный порядок в итоге: Дилер -> Ты
     txt = (
-        f"{res} ({win_amount:+})\n"
-        f"🧑 {render_hand(g['player'])} ({p_val})\n"
-        f"🤵 {render_hand(g['dealer'])} ({d_val})\n"
+        f"{res} ({win_amount:+})\n\n"
+        f"🤵 Дилер: {render_hand(g['dealer'])} ({d_val})\n"
+        f"🧑 Ты: {render_hand(g['player'])} ({p_val})\n\n"
         f"💰 Баланс: {new_bal}"
     )
     await call.message.edit_text(txt, reply_markup=main_menu_kb())
