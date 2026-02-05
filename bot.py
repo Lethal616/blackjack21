@@ -3,6 +3,7 @@ import asyncio
 import random
 import asyncpg
 import uuid
+import time
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -28,6 +29,7 @@ TOTAL_CARDS = 52 * DECKS_COUNT
 RESHUFFLE_THRESHOLD = 60
 BET_OPTIONS = [50, 100, 250]
 MAX_PLAYERS = 3
+TURN_TIMEOUT = 30 # Секунд на ход (было 45)
 
 # ====== БАЗА ДАННЫХ ======
 pool = None
@@ -116,7 +118,7 @@ class TablePlayer:
         self.original_bet = bet
         self.hand = []
         self.status = "waiting" # waiting, playing, stand, bust, blackjack
-        self.is_ready = False # Флаг готовности
+        self.is_ready = False 
         self.message_id = None 
 
     @property
@@ -143,20 +145,22 @@ class GameTable:
         self.state = "waiting" # waiting, player_turn, dealer_turn, finished
         self.current_player_index = 0
         self.shuffle_alert = False
+        self.last_action_time = time.time() # Таймштамп активности
 
     def add_player(self, user_id, name, bet):
         player = TablePlayer(user_id, name, bet)
         self.players.append(player)
+        self.update_activity()
         return player
 
     def remove_player(self, user_id):
         self.players = [p for p in self.players if p.user_id != user_id]
-        # Если ушел владелец, передаем права следующему
         if user_id == self.owner_id:
             if self.players:
                 self.owner_id = self.players[0].user_id
             else:
-                self.owner_id = None # Стол пуст, будет удален
+                self.owner_id = None 
+        self.update_activity()
 
     def get_player(self, user_id):
         for p in self.players:
@@ -169,13 +173,16 @@ class GameTable:
         return all(p.is_ready for p in self.players)
 
     def reset_round(self):
-        # Возвращаем стол в лобби для новой раздачи
         self.state = "waiting"
         self.dealer_hand = []
         for p in self.players:
             p.hand = []
-            p.is_ready = False # Сбрасываем готовность
+            p.is_ready = False 
             p.status = "waiting"
+        self.update_activity()
+
+    def update_activity(self):
+        self.last_action_time = time.time()
 
     def start_game(self):
         self.dealer_hand = []
@@ -206,10 +213,11 @@ class GameTable:
         self.process_turns() 
 
     def process_turns(self):
+        self.update_activity() # Обновляем таймер при смене хода
         while self.current_player_index < len(self.players):
             p = self.players[self.current_player_index]
             if p.status == "playing":
-                return 
+                return # Ждем хода этого игрока
             self.current_player_index += 1
         
         self.state = "dealer_turn"
@@ -234,6 +242,40 @@ class GameTable:
 
 tables = {} 
 
+# ====== ФОНОВАЯ ЗАДАЧА: ПРОВЕРКА ТАЙМАУТОВ ======
+async def check_timeouts_loop():
+    while True:
+        await asyncio.sleep(5) # Проверяем каждые 5 сек
+        now = time.time()
+        
+        # Копируем values, чтобы не было ошибки изменения словаря во время итерации
+        for table in list(tables.values()):
+            # Проверяем только если сейчас ход игрока
+            if table.state == "player_turn":
+                if now - table.last_action_time > TURN_TIMEOUT:
+                    # Время вышло!
+                    try:
+                        current_p = table.players[table.current_player_index]
+                        current_p.status = "stand" # Принудительный Stand
+                        
+                        # Уведомляем (можно в личку, но лучше обновлением стола)
+                        # Мы просто переходим к следующему
+                        table.process_turns()
+                        
+                        # Если игра завершилась из-за этого
+                        if table.state == "finished":
+                            await finalize_game_db(table)
+                        
+                        # Обновляем всем сообщения
+                        await update_table_messages(table.id)
+                        
+                        # Пытаемся отправить уведомление тому, кто проспал
+                        try: await bot.send_message(current_p.user_id, "⏳ Время хода вышло! Сработал авто-Stand.")
+                        except: pass
+                        
+                    except IndexError:
+                        pass # на всякий случай
+
 # ====== ВИЗУАЛИЗАЦИЯ ======
 
 def render_lobby(table: GameTable):
@@ -254,11 +296,7 @@ def get_lobby_kb(table: GameTable, user_id):
     if not p.is_ready:
         kb.append([InlineKeyboardButton(text="✅ Я ГОТОВ", callback_data=f"ready_{table.id}")])
     else:
-        # Если готов, можно отменить готовность (по желанию, но пока оставим просто выход)
         pass
-
-    # Кнопка старта для владельца (если вдруг нужно принудительно, но лучше автостарт)
-    # Сделаем автостарт, когда все готовы.
     
     kb.append([InlineKeyboardButton(text="🚪 Выйти", callback_data=f"leave_lobby_{table.id}")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
@@ -275,7 +313,7 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         marker = "⏳"
         if table.state == "player_turn":
             if table.players[table.current_player_index] == p:
-                marker = "👈 *ХОДИТ*"
+                marker = f"👈 *ХОДИТ* ({TURN_TIMEOUT}с)" # Динамически показываем таймер
             elif table.players.index(p) > table.current_player_index:
                 marker = "💤"
             else:
@@ -337,13 +375,11 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
 def get_game_kb(table: GameTable, player: TablePlayer):
     if table.state == "finished":
         if not table.is_public:
-            # Соло
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"replay_{table.id}")],
                 [InlineKeyboardButton(text="🚪 Меню", callback_data="menu")]
             ])
         else:
-            # Мультиплеер - кнопки продолжения
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ Продолжить", callback_data=f"rematch_{table.id}")],
                 [InlineKeyboardButton(text="🚪 Выйти", callback_data=f"leave_lobby_{table.id}")]
@@ -367,7 +403,6 @@ async def update_table_messages(table_id):
     table = tables.get(table_id)
     if not table: return
 
-    # Проверка на удаление стола (если все вышли)
     if not table.players:
         del tables[table_id]
         return
@@ -671,16 +706,9 @@ async def cb_rematch(call: CallbackQuery):
         await call.answer("Недостаточно средств для продолжения!", show_alert=True)
         return
 
-    # Если стол в статусе finished, переводим его в waiting (лобби)
-    # НО! Нужно делать это аккуратно. Если один нажал "Да", а другие думают.
-    
     if table.state == "finished":
-        table.reset_round() # Сбрасываем карты, переводим в waiting
+        table.reset_round() 
     
-    # Ставим игрока в ready (или ждем, пока он нажмет ready в лобби - давай сразу ready для удобства?)
-    # Лучше кинуть в лобби, чтобы он видел других.
-    
-    # Отправляем сообщение лобби
     txt = render_lobby(table)
     kb = get_lobby_kb(table, p.user_id)
     try:
@@ -802,6 +830,7 @@ async def cb_stats(call: CallbackQuery):
 async def main():
     await init_db()
     print("Bot started")
+    asyncio.create_task(check_timeouts_loop()) # Запуск фоновой проверки таймаутов
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
