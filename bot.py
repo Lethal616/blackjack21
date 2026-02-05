@@ -7,6 +7,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
 
 # ====== ТОКЕН И DATABASE_URL ======
 TOKEN = os.getenv("BOT_TOKEN")
@@ -124,9 +125,8 @@ def get_card(user_id):
     card = shoe.pop()
     return card, shuffled_msg
 
-# ====== ВИЗУАЛ (ОБНОВЛЕННЫЙ) ======
+# ====== ВИЗУАЛ ======
 def render_hand(hand):
-    # Убрали скобки, оставили только `карту`
     return "  ".join(f"`{r}{s}`" for r, s in hand)
 
 def get_shoe_visual(user_id):
@@ -170,11 +170,16 @@ def bet_kb():
     kb.append([InlineKeyboardButton(text="✍️ Своя ставка", callback_data="custom_bet")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-def game_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
+# Обновленная клавиатура с Double Down
+def game_kb(allow_double=False):
+    buttons = [
         [InlineKeyboardButton(text="🖐 HIT", callback_data="hit"),
          InlineKeyboardButton(text="✋ STAND", callback_data="stand")]
-    ])
+    ]
+    if allow_double:
+        buttons.insert(0, [InlineKeyboardButton(text="2️⃣ x2 (Double)", callback_data="double")])
+        
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def game_over_kb(bet):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -196,6 +201,7 @@ async def start_game_logic(user_id, bet, messageable):
             await messageable.answer(text, reply_markup=bet_kb())
         return
 
+    # Раздаем карты в логике
     c1, s1 = get_card(user_id)
     c2, s2 = get_card(user_id)
     d1, s3 = get_card(user_id)
@@ -212,23 +218,48 @@ async def start_game_logic(user_id, bet, messageable):
     
     g = active_games[user_id]
     
-    # Визуал дилера (без скобок)
-    dealer_show = f"`{g['dealer'][0][0]}{g['dealer'][0][1]}`  `❓`"
+    # === АНИМАЦИЯ РАЗДАЧИ ===
     shoe_bar = get_shoe_visual(user_id)
     
-    txt = (f"💰 Ставка: *{bet}*\n\n"
+    # 1. Сначала пишем что раздаем (для CallbackQuery редактируем, для Message отправляем новое)
+    msg_entity = None
+    initial_text = f"💰 Ставка: *{bet}*\n\n🃏 Раздаю карты...\n\n{shoe_bar}"
+    
+    if isinstance(messageable, types.CallbackQuery):
+        msg_entity = messageable.message
+        await msg_entity.edit_text(initial_text, parse_mode="Markdown")
+    else:
+        msg_entity = await messageable.answer(initial_text, parse_mode="Markdown")
+    
+    await asyncio.sleep(0.7) # Пауза для эффекта
+
+    # 2. Показываем первую карту игрока
+    step_text = (f"💰 Ставка: *{bet}*\n\n"
+                 f"🤵 Дилер:  `?`  `?`\n"
+                 f"🧑 Ты:       `{c1[0]}{c1[1]}`  `?`\n\n"
+                 f"{shoe_bar}")
+    
+    try:
+        await msg_entity.edit_text(step_text, parse_mode="Markdown")
+    except TelegramBadRequest:
+        pass # Игнорируем, если слишком быстро кликнули
+
+    await asyncio.sleep(0.7) # Пауза
+
+    # 3. Финальный вид раздачи
+    dealer_show = f"`{d1[0]}{d1[1]}`  `❓`"
+    final_text = (f"💰 Ставка: *{bet}*\n\n"
            f"🤵 Дилер:  {dealer_show}\n"
            f"🧑 Ты:       {render_hand(g['player'])}  (*{hand_value(g['player'])}*)\n\n"
            f"{shoe_bar}"
            f"{shuffle_note}")
 
-    if isinstance(messageable, types.CallbackQuery):
-        await messageable.message.edit_text(txt, reply_markup=game_kb(), parse_mode="Markdown")
-    else:
-        await messageable.answer(txt, reply_markup=game_kb(), parse_mode="Markdown")
-
     if hand_value(g['player']) == 21:
         await finish_game(user_id, messageable, blackjack=True)
+    else:
+        # Проверяем, можно ли дабл (баланс >= ставка * 2)
+        can_double = p['balance'] >= (bet * 2)
+        await msg_entity.edit_text(final_text, reply_markup=game_kb(allow_double=can_double), parse_mode="Markdown")
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -327,7 +358,6 @@ async def cb_hit(call: CallbackQuery):
     if val > 21:
         await finish_game(uid, call, lose=True)
     else:
-        # Визуал дилера
         dealer_show = f"`{g['dealer'][0][0]}{g['dealer'][0][1]}`  `❓`"
         
         txt = (f"💰 Ставка: *{g['bet']}*\n\n"
@@ -335,7 +365,45 @@ async def cb_hit(call: CallbackQuery):
                f"🧑 Ты:       {render_hand(g['player'])}  (*{val}*)\n\n"
                f"{shoe_bar}"
                f"{shuffle_note}")
-        await call.message.edit_text(txt, reply_markup=game_kb(), parse_mode="Markdown")
+        # При HIT кнопка Double Down пропадает (allow_double=False)
+        await call.message.edit_text(txt, reply_markup=game_kb(allow_double=False), parse_mode="Markdown")
+
+# === НОВЫЙ ХЕНДЛЕР: DOUBLE DOWN ===
+@dp.callback_query(lambda c: c.data == "double")
+async def cb_double(call: CallbackQuery):
+    uid = call.from_user.id
+    if uid not in active_games: return
+    g = active_games[uid]
+    
+    # 1. Проверяем баланс
+    p = await get_player(uid)
+    if p['balance'] < g['bet'] * 2:
+        await call.answer("❌ Не хватает фишек для удвоения!", show_alert=True)
+        return
+    
+    # 2. Удваиваем ставку
+    g['bet'] *= 2
+    await call.answer(f"💰 Ставка удвоена: {g['bet']}")
+    
+    # 3. Даем ОДНУ карту
+    new_card, shuffle_msg = get_card(uid)
+    g['player'].append(new_card)
+    shuffle_note = f"\n\n_{shuffle_msg}_" if shuffle_msg else ""
+    
+    val = hand_value(g['player'])
+    
+    # 4. Если перебор — сразу проигрыш, иначе — ход дилера
+    if val > 21:
+        await finish_game(uid, call, lose=True)
+    else:
+        # Автоматически Stand (ход дилера)
+        shuffle_happened = (shuffle_msg is not None)
+        while hand_value(g['dealer']) < 17:
+            card, s_msg = get_card(uid)
+            g['dealer'].append(card)
+            if s_msg: shuffle_happened = True
+            
+        await finish_game(uid, call, shuffle_alert=shuffle_happened)
 
 @dp.callback_query(lambda c: c.data == "stand")
 async def cb_stand(call: CallbackQuery):
