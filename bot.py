@@ -171,6 +171,7 @@ class GameTable:
         self.dealer_hand.append(c)
 
         for p in self.players:
+            p.bet = p.original_bet # СБРОС СТАВКИ К ОРИГИНАЛЬНОЙ (FIX DOUBLE ISSUE)
             p.hand = []
             p.status = "playing"
             c1, s1 = self.deck.get_card()
@@ -308,7 +309,7 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
 
 def get_game_kb(table: GameTable, player: TablePlayer):
     if table.state == "finished":
-        # Исправление: Передаем TABLE ID вместо ставки
+        # Если это соло стол - даем реплей
         if not table.is_public:
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"replay_{table.id}")],
@@ -490,9 +491,9 @@ async def cb_replay(call: CallbackQuery):
     # Берем игрока (в соло он один)
     p = table.players[0]
     
-    # Проверка баланса перед новым раундом
+    # Проверка баланса перед новым раундом (по ОРИГИНАЛЬНОЙ ставке)
     data = await get_player_data(p.user_id)
-    if data['balance'] < p.bet:
+    if data['balance'] < p.original_bet: 
         await call.answer("Недостаточно средств!", show_alert=True)
         return
     
