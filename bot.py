@@ -1,7 +1,8 @@
 import os
 import asyncio
 import random
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -11,6 +12,11 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("Не найден BOT_TOKEN в переменных окружения")
 
+# ====== DATABASE_URL ИЗ RAILWAY POSTGRES ======
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("Не найдена DATABASE_URL в переменных окружения (PostgreSQL)")
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -19,15 +25,15 @@ START_BALANCE = 1000
 BET_OPTIONS = [50, 100, 250]
 
 # ====== КАРТЫ ======
-RANKS = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"]
-SUITS = ["♠️","♥️","♦️","♣️"]
+RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
+SUITS = ["♠️", "♥️", "♦️", "♣️"]
 
 def random_card():
     return random.choice(RANKS), random.choice(SUITS)
 
 def card_value(card):
     rank, _ = card
-    if rank in ["J","Q","K"]:
+    if rank in ["J", "Q", "K"]:
         return 10
     if rank == "A":
         return 11
@@ -44,55 +50,86 @@ def hand_value(hand):
 def render_hand(hand):
     return " ".join(f"{rank}{suit}" for rank, suit in hand)
 
-# ====== БАЗА ======
-conn = sqlite3.connect("database.db")
-cursor = conn.cursor()
-cursor.execute("""
+# ====== POSTGRES: подключение и утилиты ======
+_conn = None
+
+def get_conn():
+    global _conn
+    if _conn is None or _conn.closed != 0:
+        _conn = psycopg2.connect(DATABASE_URL)
+    return _conn
+
+def db_fetchone(query, params=()):
+    conn = get_conn()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(query, params)
+        return cur.fetchone()
+
+def db_execute(query, params=()):
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+    conn.commit()
+
+# ====== ИНИЦИАЛИЗАЦИЯ ТАБЛИЦЫ ======
+db_execute("""
 CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    balance INTEGER,
-    games INTEGER,
-    wins INTEGER,
-    losses INTEGER,
-    pushes INTEGER,
-    blackjacks INTEGER,
-    max_balance INTEGER
+    user_id BIGINT PRIMARY KEY,
+    balance INTEGER DEFAULT 1000,
+    games INTEGER DEFAULT 0,
+    wins INTEGER DEFAULT 0,
+    losses INTEGER DEFAULT 0,
+    pushes INTEGER DEFAULT 0,
+    blackjacks INTEGER DEFAULT 0,
+    max_balance INTEGER DEFAULT 1000
 )
 """)
-conn.commit()
 
-# ====== СЛОВАРЬ ДЛЯ ИГРОКОВ ======
+# ====== СЛОВАРЬ ДЛЯ ИГРОКОВ (кэш в RAM) ======
 players = {}
 
-def load_player(user_id):
-    """Подгружает игрока из базы или создаёт нового"""
+def load_player(user_id: int):
+    """Подгружает игрока из Postgres или создаёт нового"""
     if user_id in players:
         return players[user_id]
 
-    cursor.execute(
-        "SELECT balance, games, wins, losses, pushes, blackjacks, max_balance FROM users WHERE user_id=?",
+    row = db_fetchone(
+        """
+        SELECT balance, games, wins, losses, pushes, blackjacks, max_balance
+        FROM users
+        WHERE user_id = %s
+        """,
         (user_id,)
     )
-    row = cursor.fetchone()
+
     if row:
-        balance, games, wins, losses, pushes, blackjacks, max_balance = row
         players[user_id] = {
-            "balance": balance,
+            "balance": row["balance"],
             "bet": None,
             "last_bet": None,
             "in_game": False,
             "player": [],
             "dealer": [],
             "stats": {
-                "games": games,
-                "wins": wins,
-                "losses": losses,
-                "pushes": pushes,
-                "blackjacks": blackjacks,
-                "max_balance": max_balance
+                "games": row["games"],
+                "wins": row["wins"],
+                "losses": row["losses"],
+                "pushes": row["pushes"],
+                "blackjacks": row["blackjacks"],
+                "max_balance": row["max_balance"]
             }
         }
     else:
+        # создаём нового игрока в БД (один раз)
+        db_execute(
+            """
+            INSERT INTO users (user_id, balance, games, wins, losses, pushes, blackjacks, max_balance)
+            VALUES (%s, %s, 0, 0, 0, 0, 0, %s)
+            ON CONFLICT (user_id) DO NOTHING
+            """,
+            (user_id, START_BALANCE, START_BALANCE)
+        )
+
         players[user_id] = {
             "balance": START_BALANCE,
             "bet": None,
@@ -109,20 +146,26 @@ def load_player(user_id):
                 "max_balance": START_BALANCE
             }
         }
-        cursor.execute(
-            "INSERT OR IGNORE INTO users VALUES (?,?,?,?,?,?,?,?)",
-            (user_id, START_BALANCE, 0, 0, 0, 0, 0, START_BALANCE)
-        )
-        conn.commit()
+
     return players[user_id]
 
-def save_player(user_id):
-    """Сохраняет игрока в базу"""
+def save_player(user_id: int):
+    """Сохраняет игрока в Postgres (upsert)"""
     user = players[user_id]
     s = user["stats"]
-    cursor.execute(
+
+    db_execute(
         """
-        INSERT OR REPLACE INTO users VALUES (?,?,?,?,?,?,?,?)
+        INSERT INTO users (user_id, balance, games, wins, losses, pushes, blackjacks, max_balance)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (user_id) DO UPDATE SET
+            balance = EXCLUDED.balance,
+            games = EXCLUDED.games,
+            wins = EXCLUDED.wins,
+            losses = EXCLUDED.losses,
+            pushes = EXCLUDED.pushes,
+            blackjacks = EXCLUDED.blackjacks,
+            max_balance = GREATEST(users.max_balance, EXCLUDED.max_balance)
         """,
         (
             user_id,
@@ -132,10 +175,9 @@ def save_player(user_id):
             s["losses"],
             s["pushes"],
             s["blackjacks"],
-            s["max_balance"]
+            s["max_balance"],
         )
     )
-    conn.commit()
 
 # ====== КЛАВИАТУРЫ ======
 def main_menu_keyboard():
@@ -307,7 +349,6 @@ async def finish_round(call: CallbackQuery, blackjack=False, lose=False):
         f"🤵 Дилер: {render_hand(user['dealer'])} ({dealer_val})\n\n"
         f"💰 Баланс: {user['balance']}"
     )
-
     await call.message.edit_text(text, reply_markup=main_menu_keyboard())
 
 # ====== СТАТИСТИКА ======
