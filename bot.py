@@ -126,18 +126,16 @@ def get_card(user_id):
 
 # ====== ВИЗУАЛ (НОВОЕ) ======
 def render_hand(hand):
-    # Делаем карты в виде [ A♠️ ] [ 10♥️ ]
-    return "  ".join(f"[`{r}{s}`]" for r, s in hand)
+    # Теперь скобки ВНУТРИ backticks: `[ A♠️ ]`
+    return "  ".join(f"`[ {r}{s} ]`" for r, s in hand)
 
 def get_shoe_visual(user_id):
     if user_id not in user_shoes:
         return "🎴 Колода: 100%"
     
     current = len(user_shoes[user_id])
-    # Вычисляем процент от 260 карт
     percent = current / TOTAL_CARDS
     
-    # Рисуем полоску из 10 кубиков
     blocks = int(percent * 10)
     bar = "▓" * blocks + "░" * (10 - blocks)
     
@@ -214,8 +212,8 @@ async def start_game_logic(user_id, bet, messageable):
     
     g = active_games[user_id]
     
-    # Визуал
-    dealer_show = f"[`{g['dealer'][0][0]}{g['dealer'][0][1]}`]  [`❓`]"
+    # Визуал дилера (скобки внутри)
+    dealer_show = f"`[ {g['dealer'][0][0]}{g['dealer'][0][1]} ]`  `[ ❓ ]`"
     shoe_bar = get_shoe_visual(user_id)
     
     txt = (f"💰 Ставка: *{bet}*\n\n"
@@ -329,7 +327,8 @@ async def cb_hit(call: CallbackQuery):
     if val > 21:
         await finish_game(uid, call, lose=True)
     else:
-        dealer_show = f"[`{g['dealer'][0][0]}{g['dealer'][0][1]}`]  [`❓`]"
+        # Визуал дилера
+        dealer_show = f"`[ {g['dealer'][0][0]}{g['dealer'][0][1]} ]`  `[ ❓ ]`"
         
         txt = (f"💰 Ставка: *{g['bet']}*\n\n"
                f"🤵 Дилер:  {dealer_show}\n"
