@@ -321,7 +321,8 @@ async def cb_stats(call: CallbackQuery):
         f"📈 Win Rate: *{win_rate}%*\n\n"
         f"🪙 Баланс: *{p['balance']}*\n"
         f"🏦 Макс. баланс: *{s['max_balance']}*\n"
-        f"🤑 Макс. выигрыш: *{s['max_win']}*"
+        f"🤑 Макс. выигрыш: *{s['max_win']}*\n\n"
+        f"🆔 ID: `{call.from_user.id}`"
     )
     
     await call.message.edit_text(
@@ -354,14 +355,12 @@ async def cb_hit(call: CallbackQuery):
         
     # 2. РОВНО 21 - АВТОМАТИЧЕСКИЙ STAND
     elif val == 21:
-        # Логика дилера (копируем из cb_stand)
         shuffle_happened = (shuffle_msg is not None)
         while hand_value(g['dealer']) < 17:
             card, s_msg = get_card(uid)
             g['dealer'].append(card)
             if s_msg: shuffle_happened = True
         
-        # Отправляем уведомление, что набрали 21
         await call.answer("21! Ход дилера...", show_alert=False)
         await finish_game(uid, call, shuffle_alert=shuffle_happened)
         
