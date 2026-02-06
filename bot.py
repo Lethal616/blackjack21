@@ -278,7 +278,7 @@ async def check_timeouts_loop():
                     except IndexError:
                         pass 
 
-# ====== ВИЗУАЛИЗАЦИЯ (DEALER SUM ADDED) ======
+# ====== ВИЗУАЛИЗАЦИЯ (DEALER SUM ADDED LIKE PLAYER) ======
 
 def render_lobby(table: GameTable):
     txt = f"🎰 *BLACKJACK TABLE #{table.id}*\n"
@@ -313,22 +313,20 @@ def get_lobby_kb(table: GameTable, user_id):
 async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bot):
     if table.state == "finished":
         d_val = table._hand_value(table.dealer_hand)
-        # FIX: Убраны скобки
         d_cards = " ".join(f"`{r}{s}`" for r,s in table.dealer_hand)
+        # FIX: Отображаем сумму дилера справа, как у игрока
         dealer_section = (
-            f"🤵 *DEALER* ({d_val})\n"
-            f"{d_cards}\n"
+            f"🤵 *DEALER*\n"
+            f"{d_cards} ➡️ *{d_val}*\n"
         )
     else:
         visible = table.dealer_hand[0]
-        # FIX: считаем очки видимой карты
         vis_val = table._hand_value([visible])
-        
-        # FIX: Убраны скобки
         d_cards = f"`{visible[0]}{visible[1]}` `??`"
+        # FIX: Отображаем сумму видимой карты дилера справа, как у игрока
         dealer_section = (
-            f"🤵 *DEALER* ({vis_val})\n" # Добавлено отображение суммы
-            f"{d_cards}\n"
+            f"🤵 *DEALER*\n"
+            f"{d_cards} ➡️ *{vis_val}*\n"
         )
 
     players_section = ""
