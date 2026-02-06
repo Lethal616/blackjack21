@@ -173,7 +173,8 @@ class GameTable:
     def add_chat_message(self, name, text):
         clean_text = text[:30] 
         self.chat_history.append(f"{name}: {clean_text}")
-        if len(self.chat_history) > 3: 
+        # FIX: Увеличили лимит до 5 сообщений
+        if len(self.chat_history) > 5: 
             self.chat_history.pop(0)
     
     def check_all_ready(self):
@@ -251,7 +252,6 @@ class GameTable:
 
 tables = {} 
 
-# === НОВАЯ ФУНКЦИЯ: ВЫХОД ИЗ ВСЕХ СТОЛОВ ===
 def leave_all_tables(user_id, exclude_tid=None):
     """Гарантирует, что игрок не сидит за другими столами"""
     for tid in list(tables.keys()):
@@ -390,9 +390,12 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         f"🃏 Шу: {shoe_bar}{shuffle_alert}"
     )
 
-    chat_section = ""
+    # FIX: Добавлена постоянная секция чата с подсказкой
+    chat_section = "\n───────────────\n"
     if table.chat_history:
-        chat_section = "\n───────────────\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
+        chat_section += "\n".join([f"▫️ {msg}" for msg in table.chat_history]) + "\n"
+    
+    chat_section += "✎ _Напишите сообщение в этот чат_"
 
     final_text = (
         f"🎰 *TABLE #{table.id}*\n"
@@ -538,7 +541,6 @@ async def cb_start_solo(call: CallbackQuery):
     data = await get_player_data(call.from_user.id)
     if data['balance'] < bet: return await call.answer("Мало денег!", show_alert=True)
     
-    # FIX: Выходим из других столов
     leave_all_tables(call.from_user.id)
 
     tid = str(uuid.uuid4())[:8]
@@ -571,7 +573,6 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
             await message.answer("Недостаточно средств!")
             return
         
-        # FIX: Выходим из других столов
         leave_all_tables(message.from_user.id)
         
         tid = str(uuid.uuid4())[:8]
@@ -601,7 +602,6 @@ async def cb_replay(call: CallbackQuery):
          await call.answer("Сессия истекла", show_alert=True)
          return await cb_play_solo(call)
     
-    # FIX: Если мы в этом столе, ок. Но если вдруг есть дубли — чистим остальные
     leave_all_tables(call.from_user.id, exclude_tid=tid)
     
     p = table.players[0]
@@ -672,7 +672,6 @@ async def create_multi_table(call: CallbackQuery, bet: int):
     data = await get_player_data(call.from_user.id)
     if data['balance'] < bet: return await call.answer("Не хватает денег!", show_alert=True)
     
-    # FIX: Чистим старые столы
     leave_all_tables(call.from_user.id)
     
     tid = str(uuid.uuid4())[:5]
@@ -725,7 +724,7 @@ async def process_multi_custom_bet(message: types.Message, state: FSMContext):
             return
             
         if mode == "create":
-            leave_all_tables(message.from_user.id) # FIX
+            leave_all_tables(message.from_user.id) 
             
             tid = str(uuid.uuid4())[:5]
             table = GameTable(tid, is_public=True, owner_id=message.from_user.id)
@@ -758,7 +757,6 @@ async def join_multi_table(msg_obj, tid, bet):
     if table.get_player(msg_obj.from_user.id):
         return await msg_obj.answer("Вы уже здесь!")
 
-    # FIX: Чистим старые столы перед входом
     leave_all_tables(msg_obj.from_user.id)
     
     data = await get_player_data(msg_obj.from_user.id)
@@ -788,7 +786,6 @@ async def cb_join_confirm(call: CallbackQuery):
     if data['balance'] < bet:
         return await call.answer("Не хватает денег!", show_alert=True)
 
-    # FIX: Чистим старые столы
     leave_all_tables(call.from_user.id)
 
     p = table.add_player(call.from_user.id, call.from_user.first_name, bet, current_balance=data['balance'])
