@@ -111,7 +111,7 @@ class CardSystem:
         return f"🎴 Колода: {bar} ({int(percent * 100)}%)"
 
 class TablePlayer:
-    def __init__(self, user_id, name, bet):
+    def __init__(self, user_id, name, bet, start_balance):
         self.user_id = user_id
         self.name = name
         self.bet = bet
@@ -120,6 +120,7 @@ class TablePlayer:
         self.status = "waiting" # waiting, playing, stand, bust, blackjack
         self.is_ready = False 
         self.message_id = None 
+        self.start_balance = start_balance # Запоминаем баланс при входе за стол
 
     @property
     def value(self):
@@ -146,10 +147,10 @@ class GameTable:
         self.current_player_index = 0
         self.shuffle_alert = False
         self.last_action_time = time.time() # Таймштамп активности
-        self.chat_history = [] # Храним последние сообщения [(name, msg), ...]
+        self.chat_history = [] 
 
-    def add_player(self, user_id, name, bet):
-        player = TablePlayer(user_id, name, bet)
+    def add_player(self, user_id, name, bet, current_balance):
+        player = TablePlayer(user_id, name, bet, start_balance=current_balance)
         self.players.append(player)
         self.update_activity()
         return player
@@ -169,11 +170,10 @@ class GameTable:
                 return p
         return None
     
-    # === ЧАТ ФУНКЦИЯ ===
     def add_chat_message(self, name, text):
-        clean_text = text[:25] # Обрезаем слишком длинные
+        clean_text = text[:25] 
         self.chat_history.append(f"{name}: {clean_text}")
-        if len(self.chat_history) > 3: # Храним только 3 последних
+        if len(self.chat_history) > 3: 
             self.chat_history.pop(0)
     
     def check_all_ready(self):
@@ -288,7 +288,6 @@ def render_lobby(table: GameTable):
         status = "✅ Готов" if p.is_ready else "⏳ Ждем..."
         txt += f"{i}. {role} {p.name} — *{p.bet}* 🪙 ({status})\n"
     
-    # Отрисовка чата в лобби
     if table.chat_history:
         txt += "\n💬 *Чат:*\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
     else:
@@ -339,7 +338,17 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
     
     res_text = ""
     p_data = await get_player_data(player.user_id)
-    balance_display = f"\n🪙 Баланс: *{p_data['balance']}*"
+    
+    # === РАСЧЕТ ПРОФИТА СЕССИИ ===
+    current_balance = p_data['balance']
+    # Находим нашего игрока в объекте стола, чтобы узнать его start_balance
+    my_p_obj = table.get_player(player.user_id)
+    session_diff = 0
+    if my_p_obj:
+        session_diff = current_balance - my_p_obj.start_balance
+    
+    diff_str = f"+{session_diff}" if session_diff > 0 else f"{session_diff}"
+    balance_display = f"\n🪙 Баланс: *{current_balance}* ({diff_str})"
     
     if table.state == "finished":
         d_val = table._hand_value(table.dealer_hand)
@@ -369,7 +378,6 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
              
         res_text += f" ({win:+})"
     
-    # === ОТРИСОВКА ЧАТА ===
     chat_section = ""
     if table.chat_history:
         chat_section = "\n\n💬 *Чат стола:*\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
@@ -520,7 +528,9 @@ async def cb_start_solo(call: CallbackQuery):
     tid = str(uuid.uuid4())[:8]
     table = GameTable(tid, is_public=False, owner_id=call.from_user.id)
     tables[tid] = table
-    p = table.add_player(call.from_user.id, call.from_user.first_name, bet)
+    # Передаем текущий баланс при посадке
+    p = table.add_player(call.from_user.id, call.from_user.first_name, bet, current_balance=data['balance'])
+    
     table.start_game()
     txt = await render_table_for_player(table, p, bot)
     kb = get_game_kb(table, p)
@@ -541,7 +551,6 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
     try:
         bet = int(message.text)
         if bet <= 0: raise ValueError
-        # Запускаем соло игру с этой ставкой
         data = await get_player_data(message.from_user.id)
         if data['balance'] < bet:
             await message.answer("Недостаточно средств!")
@@ -550,7 +559,9 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
         tid = str(uuid.uuid4())[:8]
         table = GameTable(tid, is_public=False, owner_id=message.from_user.id)
         tables[tid] = table
-        p = table.add_player(message.from_user.id, message.from_user.first_name, bet)
+        # Передаем баланс
+        p = table.add_player(message.from_user.id, message.from_user.first_name, bet, current_balance=data['balance'])
+        
         table.start_game()
         txt = await render_table_for_player(table, p, bot)
         kb = get_game_kb(table, p)
@@ -590,11 +601,9 @@ async def cb_replay(call: CallbackQuery):
 # -- МУЛЬТИПЛЕЕР: СПИСОК СТОЛОВ --
 @dp.callback_query(lambda c: c.data == "play_multi" or c.data == "refresh_multi")
 async def cb_play_multi(call: CallbackQuery):
-    # Фильтруем публичные столы, которые ждут игроков
     waiting_tables = [t for t in tables.values() if t.is_public and t.state == "waiting"]
     
     kb = []
-    # Показываем столы с именем владельца
     for t in waiting_tables[:5]: 
         owner_name = t.players[0].name if t.players else "Неизвестно"
         players_cnt = len(t.players)
@@ -628,20 +637,17 @@ async def cb_create_setup(call: CallbackQuery):
     kb.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="play_multi")])
     await call.message.edit_text("С какой ставкой вы хотите создать стол?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# Создание: фиксированная ставка
 @dp.callback_query(lambda c: c.data.startswith("new_multi_"))
 async def cb_new_multi_created(call: CallbackQuery):
     bet = int(call.data.split("_")[2])
     await create_multi_table(call, bet)
 
-# Создание: кастомная ставка (Ввод)
 @dp.callback_query(lambda c: c.data == "multi_custom_create")
 async def cb_multi_custom_create_input(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("✍️ Введите ставку для стола:")
     await state.set_state(MultiCustomBet.waiting)
     await state.update_data(mode="create")
 
-# Общая функция создания
 async def create_multi_table(call: CallbackQuery, bet: int):
     data = await get_player_data(call.from_user.id)
     if data['balance'] < bet: return await call.answer("Не хватает денег!", show_alert=True)
@@ -650,7 +656,7 @@ async def create_multi_table(call: CallbackQuery, bet: int):
     table = GameTable(tid, is_public=True, owner_id=call.from_user.id)
     tables[tid] = table
     
-    p = table.add_player(call.from_user.id, call.from_user.first_name, bet)
+    p = table.add_player(call.from_user.id, call.from_user.first_name, bet, current_balance=data['balance'])
     
     txt = render_lobby(table)
     kb = get_lobby_kb(table, p.user_id)
@@ -674,7 +680,6 @@ async def cb_prejoin(call: CallbackQuery):
     kb.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="play_multi")])
     await call.message.edit_text(f"Вы входите за стол #{tid}.\nВаша ставка?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# Присоединение: кастомная ставка (Ввод)
 @dp.callback_query(lambda c: c.data.startswith("multi_custom_join_"))
 async def cb_multi_custom_join_input(call: CallbackQuery, state: FSMContext):
     tid = call.data.split("_")[3]
@@ -682,7 +687,6 @@ async def cb_multi_custom_join_input(call: CallbackQuery, state: FSMContext):
     await state.set_state(MultiCustomBet.waiting)
     await state.update_data(mode="join", tid=tid)
 
-# ОБРАБОТЧИК ВВОДА КАСТОМНОЙ СТАВКИ (МУЛЬТИПЛЕЕР)
 @dp.message(MultiCustomBet.waiting)
 async def process_multi_custom_bet(message: types.Message, state: FSMContext):
     try:
@@ -692,18 +696,16 @@ async def process_multi_custom_bet(message: types.Message, state: FSMContext):
         user_data = await state.get_data()
         mode = user_data.get("mode")
         
-        # Проверяем баланс
         p_data = await get_player_data(message.from_user.id)
         if p_data['balance'] < bet:
             await message.answer("Недостаточно средств!")
             return
             
         if mode == "create":
-            # Создаем стол (имитируем callback для удобства вызова create_multi_table, но проще создать вручную)
             tid = str(uuid.uuid4())[:5]
             table = GameTable(tid, is_public=True, owner_id=message.from_user.id)
             tables[tid] = table
-            p = table.add_player(message.from_user.id, message.from_user.first_name, bet)
+            p = table.add_player(message.from_user.id, message.from_user.first_name, bet, current_balance=p_data['balance'])
             
             txt = render_lobby(table)
             kb = get_lobby_kb(table, p.user_id)
@@ -724,12 +726,13 @@ async def process_multi_custom_bet(message: types.Message, state: FSMContext):
         await message.answer("Введите целое число > 0")
 
 async def join_multi_table(msg_obj, tid, bet):
-    # msg_obj может быть message или call, но здесь мы вызываем из message handler
     table = tables.get(tid)
     if not table or table.state != "waiting":
          return await msg_obj.answer("Стол исчез или игра началась.")
-
-    p = table.add_player(msg_obj.from_user.id, msg_obj.from_user.first_name, bet)
+    
+    # Получаем актуальные данные для инициализации start_balance
+    data = await get_player_data(msg_obj.from_user.id)
+    p = table.add_player(msg_obj.from_user.id, msg_obj.from_user.first_name, bet, current_balance=data['balance'])
     
     txt = render_lobby(table)
     kb = get_lobby_kb(table, p.user_id)
@@ -738,7 +741,6 @@ async def join_multi_table(msg_obj, tid, bet):
     
     await update_table_messages(tid)
 
-# -- 3. Присоединение к столу (Вход фикс) --
 @dp.callback_query(lambda c: c.data.startswith("joinbet_"))
 async def cb_join_confirm(call: CallbackQuery):
     parts = call.data.split("_") 
@@ -753,7 +755,7 @@ async def cb_join_confirm(call: CallbackQuery):
     if data['balance'] < bet:
         return await call.answer("Не хватает денег!", show_alert=True)
 
-    p = table.add_player(call.from_user.id, call.from_user.first_name, bet)
+    p = table.add_player(call.from_user.id, call.from_user.first_name, bet, current_balance=data['balance'])
     
     txt = render_lobby(table)
     kb = get_lobby_kb(table, p.user_id)
@@ -961,6 +963,10 @@ async def cb_stats(call: CallbackQuery):
     total_games = s['games']
     win_rate = round((s['wins'] / total_games * 100), 1) if total_games > 0 else 0
     
+    # Считаем общий профит (Текущий баланс - 1000)
+    net_profit = data['balance'] - 1000
+    net_str = f"+{net_profit}" if net_profit > 0 else f"{net_profit}"
+
     stats_text = (
         f"📊 *Личная статистика*\n\n"
         f"🎮 Игры: *{s['games']}*\n"
@@ -970,6 +976,7 @@ async def cb_stats(call: CallbackQuery):
         f"🃏 Blackjack: *{s['blackjacks']}*\n"
         f"📈 Win Rate: *{win_rate}%*\n\n"
         f"🪙 Баланс: *{data['balance']}*\n"
+        f"💵 Профит: *{net_str}*\n"
         f"🏦 Макс. баланс: *{s['max_balance']}*\n"
         f"🤑 Макс. выигрыш: *{s['max_win']}*\n\n"
         f"🆔 ID: `{call.from_user.id}`"
@@ -984,32 +991,25 @@ async def cb_stats(call: CallbackQuery):
 # ====== CHAT HANDLER ======
 @dp.message(F.text)
 async def process_table_chat(message: types.Message, state: FSMContext):
-    # Если игрок находится в состоянии ввода ставки, игнорируем чат
     current_state = await state.get_state()
     if current_state is not None:
         return
 
-    # 1. Сначала пытаемся удалить сообщение пользователя (для чистоты)
-    # ВАЖНО: Может не работать в ЛС с ботом из-за ограничений Telegram API
     try:
         await message.delete()
     except:
-        pass # Если не получилось удалить, просто игнорируем ошибку
+        pass 
 
     user_id = message.from_user.id
     target_table = None
     
-    # Ищем, за каким столом сидит пользователь
     for table in tables.values():
         if table.get_player(user_id):
             target_table = table
             break
             
     if target_table:
-        # Добавляем сообщение
         target_table.add_chat_message(message.from_user.first_name, message.text)
-        
-        # Обновляем стол
         await update_table_messages(target_table.id)
 
 async def main():
