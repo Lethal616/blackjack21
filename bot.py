@@ -65,7 +65,7 @@ async def init_db():
                 id SERIAL PRIMARY KEY,
                 table_id TEXT,
                 user_id BIGINT,
-                username TEXT, -- Добавили сюда
+                username TEXT, 
                 bet INTEGER,
                 result TEXT, 
                 win_amount INTEGER, 
@@ -74,7 +74,6 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
-        # Миграция: добавляем username в логи, если таблица уже есть
         try:
             await conn.execute("ALTER TABLE game_logs ADD COLUMN IF NOT EXISTS username TEXT")
         except: pass
@@ -109,7 +108,7 @@ async def get_player_data(user_id, username=None):
         
         return {
             "balance": row["balance"],
-            "username": row["username"], # Возвращаем username из БД
+            "username": row["username"], 
             "stats": {
                 "games": row["games"], "wins": row["wins"], "losses": row["losses"],
                 "pushes": row["pushes"], "blackjacks": row["blackjacks"],
@@ -531,7 +530,7 @@ async def finalize_game_db(table: GameTable):
     d_val = table._hand_value(table.dealer_hand)
     
     for p in table.players:
-        data = await get_player_data(p.user_id) # ТУТ МЫ ПОЛУЧАЕМ И USERNAME ИЗ БАЗЫ
+        data = await get_player_data(p.user_id) 
         p_username = data.get('username', 'Unknown')
         stats = data['stats']
         bal = data['balance']
@@ -581,13 +580,22 @@ class MultiCustomBet(StatesGroup):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    # Передаем username при старте
     data = await get_player_data(message.from_user.id, message.from_user.username)
-    await message.answer(
-        f"🃏 *Blackjack Revolution*\n🪙 Баланс: {data['balance']}",
-        parse_mode="Markdown",
-        reply_markup=main_menu_kb()
+    s = data['stats']
+    name = f"@{data['username']}" if data['username'] else message.from_user.first_name
+
+    text = (
+        f"🎩 *Blackjack Revolution*\n"
+        f"_Искусство побеждать. Стратегия, удача и холодный расчет._\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"👤 *Профиль:* {name}\n"
+        f"💼 *Счет:* {data['balance']} 🪙\n"
+        f"🏆 *Побед:* {s['wins']}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"🎲 _Столы открыты. Делайте ваши ставки._"
     )
+    
+    await message.answer(text, parse_mode="Markdown", reply_markup=main_menu_kb())
 
 def main_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -599,7 +607,20 @@ def main_menu_kb():
 @dp.callback_query(lambda c: c.data == "menu")
 async def cb_menu(call: CallbackQuery):
     data = await get_player_data(call.from_user.id, call.from_user.username)
-    await call.message.edit_text(f"🪙 Баланс: {data['balance']}", reply_markup=main_menu_kb())
+    s = data['stats']
+    name = f"@{data['username']}" if data['username'] else call.from_user.first_name
+    
+    text = (
+        f"🎩 *Blackjack Revolution*\n"
+        f"_Искусство побеждать. Стратегия, удача и холодный расчет._\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"👤 *Профиль:* {name}\n"
+        f"💼 *Счет:* {data['balance']} 🪙\n"
+        f"🏆 *Побед:* {s['wins']}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"🎲 _Столы открыты. Делайте ваши ставки._"
+    )
+    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=main_menu_kb())
 
 # -- СОЛО --
 @dp.callback_query(lambda c: c.data == "play_solo")
