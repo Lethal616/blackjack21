@@ -179,6 +179,7 @@ class GameTable:
             p.hand = []
             p.is_ready = False 
             p.status = "waiting"
+            p.bet = p.original_bet # Сбрасываем ставку к базовой (фикс бага с x2)
         self.update_activity()
 
     def update_activity(self):
