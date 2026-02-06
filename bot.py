@@ -989,6 +989,13 @@ async def process_table_chat(message: types.Message, state: FSMContext):
     if current_state is not None:
         return
 
+    # 1. Сначала пытаемся удалить сообщение пользователя (для чистоты)
+    # ВАЖНО: Может не работать в ЛС с ботом из-за ограничений Telegram API
+    try:
+        await message.delete()
+    except:
+        pass # Если не получилось удалить, просто игнорируем ошибку
+
     user_id = message.from_user.id
     target_table = None
     
