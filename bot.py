@@ -33,6 +33,14 @@ BET_OPTIONS = [50, 100, 250]
 MAX_PLAYERS = 3
 TURN_TIMEOUT = 30 
 
+# ====== ПОМОЩНИКИ ======
+def escape_markdown(text):
+    """Экранирует спецсимволы Markdown V2/Markdown, чтобы никнеймы не ломали верстку"""
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f"\\{char}")
+    return text
+
 # ====== БАЗА ДАННЫХ ======
 pool = None
 
@@ -40,7 +48,6 @@ async def init_db():
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL)
     async with pool.acquire() as conn:
-        # Таблица пользователей
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -59,7 +66,6 @@ async def init_db():
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
         except: pass
 
-        # Таблица логов игр
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS game_logs (
                 id SERIAL PRIMARY KEY,
@@ -78,7 +84,6 @@ async def init_db():
             await conn.execute("ALTER TABLE game_logs ADD COLUMN IF NOT EXISTS username TEXT")
         except: pass
         
-        # Таблица логов чата
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_logs (
                 id SERIAL PRIMARY KEY,
@@ -168,7 +173,7 @@ class Hand:
     def __init__(self, bet):
         self.cards = []
         self.bet = bet
-        self.status = "playing" # playing, stand, bust, blackjack, double_stand
+        self.status = "playing" # playing, stand, bust, blackjack
     
     @property
     def value(self):
@@ -186,10 +191,10 @@ class TablePlayer:
     def __init__(self, user_id, name, bet, start_balance):
         self.user_id = user_id
         self.name = name
-        self.initial_bet = bet # Базовая ставка
+        self.initial_bet = bet 
         self.start_balance = start_balance
         
-        self.hands = [] # Список объектов Hand
+        self.hands = [] 
         self.current_hand_index = 0
         
         self.is_ready = False 
@@ -314,25 +319,21 @@ class GameTable:
         
         if s1 or s2: self.shuffle_alert = True
         
-        # Автостенд, если пришло 21 (но не блэкджек)
         if current_h.value == 21: current_h.status = "stand"
         if new_hand.value == 21: new_hand.status = "stand"
 
-    # ИСПРАВЛЕННАЯ ЛОГИКА ПЕРЕКЛЮЧЕНИЯ
     def process_turns(self):
         self.update_activity() 
         
         while self.current_player_index < len(self.players):
             p = self.players[self.current_player_index]
             
-            # Ищем руку, которая еще играет
             while p.current_hand_index < len(p.hands):
                 hand = p.hands[p.current_hand_index]
                 if hand.status == "playing":
-                    return # Нашли активную руку, останавливаемся тут
-                p.current_hand_index += 1 # Эта рука все, переходим к следующей
+                    return 
+                p.current_hand_index += 1 
             
-            # Все руки игрока сыграны
             self.current_player_index += 1
         
         self.state = "dealer_turn"
@@ -402,13 +403,15 @@ def render_lobby(table: GameTable):
     for i, p in enumerate(table.players, 1):
         role = "👑" if p.user_id == table.owner_id else "👤"
         status = "✅ ГОТОВ" if p.is_ready else "⏳ НЕ ГОТОВ"
-        txt += f"{status} {role} *{p.name}* — {p.initial_bet} 🪙\n"
+        
+        safe_name = escape_markdown(p.name)
+        txt += f"{status} {role} *{safe_name}* — {p.initial_bet} 🪙\n"
     
     txt += f"───────────────\n"
     txt += f"👥 Мест: {len(table.players)}/{MAX_PLAYERS}\n"
     
     if table.chat_history:
-        txt += "\n💬 *LIVE CHAT:*\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
+        txt += "\n💬 *LIVE CHAT:*\n" + "\n".join([f"▫️ {escape_markdown(msg)}" for msg in table.chat_history])
     else:
         txt += "\n💬 (Напишите сообщение...)"
 
@@ -444,7 +447,6 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
 
     players_section = ""
     for p in table.players:
-        # Маркер хода игрока
         player_status_marker = "💤"
         if table.state == "player_turn":
             if table.players[table.current_player_index] == p:
@@ -464,21 +466,20 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
              action_trail = " (🤔 ДУМАЕТ...)"
         
         is_me = " (Вы)" if p.user_id == player.user_id else ""
-        players_section += f"{player_status_marker} *{p.name}*{is_me}{action_trail}\n"
+        safe_name = escape_markdown(p.name)
+        players_section += f"{player_status_marker} *{safe_name}*{is_me}{action_trail}\n"
         
-        # Рендеринг рук игрока
         for i, hand in enumerate(p.hands):
             hand_prefix = ""
             if len(p.hands) > 1:
                 hand_prefix = f"   ✋ Рука {i+1}: "
                 if p == table.players[table.current_player_index] and i == p.current_hand_index and table.state == "player_turn":
-                    hand_prefix = f"   👉 Рука {i+1}: " # Активная рука
+                    hand_prefix = f"   👉 Рука {i+1}: " 
             else:
                 hand_prefix = "   "
 
             cards_line = f"{hand.render()} ➡️ *{hand.value}*"
             
-            # Статус руки в конце игры
             status_text = ""
             if table.state == "finished":
                 d_val = table._hand_value(table.dealer_hand)
@@ -516,7 +517,7 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
 
     chat_section = "\n───────────────\n"
     if table.chat_history:
-        chat_section += "\n".join([f"▫️ {msg}" for msg in table.chat_history]) + "\n"
+        chat_section += "\n".join([f"▫️ {escape_markdown(msg)}" for msg in table.chat_history]) + "\n"
     chat_section += "✎ _Напишите сообщение в этот чат_"
 
     final_text = (
@@ -589,7 +590,10 @@ async def update_table_messages(table_id):
                 kb = get_lobby_kb(table, p.user_id)
                 try:
                     await bot.edit_message_text(txt, chat_id=p.user_id, message_id=p.message_id, reply_markup=kb, parse_mode="Markdown")
-                except TelegramBadRequest: pass
+                except TelegramBadRequest as e:
+                    # Игнорируем ошибку "сообщение не изменено", но логируем остальные
+                    if "message is not modified" not in str(e).lower():
+                        print(f"Error updating lobby message: {e}")
         return
 
     for p in table.players:
@@ -598,7 +602,9 @@ async def update_table_messages(table_id):
             kb = get_game_kb(table, p)
             try:
                 await bot.edit_message_text(txt, chat_id=p.user_id, message_id=p.message_id, reply_markup=kb, parse_mode="Markdown")
-            except TelegramBadRequest: pass
+            except TelegramBadRequest as e:
+                if "message is not modified" not in str(e).lower():
+                    print(f"Error updating game message for {p.name}: {e}")
 
 async def finalize_game_db(table: GameTable):
     d_val = table._hand_value(table.dealer_hand)
@@ -670,7 +676,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         f"🎩 *Blackjack Revolution*\n"
         f"_Искусство побеждать. Стратегия, удача и холодный расчет._\n\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"👤 *Профиль:* {name}\n"
+        f"👤 *Профиль:* {escape_markdown(name)}\n"
         f"💼 *Счет:* {data['balance']} 🪙\n"
         f"🏆 *Побед:* {s['wins']}\n"
         f"━━━━━━━━━━━━━━━\n\n"
@@ -696,7 +702,7 @@ async def cb_menu(call: CallbackQuery):
         f"🎩 *Blackjack Revolution*\n"
         f"_Искусство побеждать. Стратегия, удача и холодный расчет._\n\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"👤 *Профиль:* {name}\n"
+        f"👤 *Профиль:* {escape_markdown(name)}\n"
         f"💼 *Счет:* {data['balance']} 🪙\n"
         f"🏆 *Побед:* {s['wins']}\n"
         f"━━━━━━━━━━━━━━━\n\n"
@@ -704,7 +710,6 @@ async def cb_menu(call: CallbackQuery):
     )
     await call.message.edit_text(text, parse_mode="Markdown", reply_markup=main_menu_kb())
 
-# -- СОЛО --
 @dp.callback_query(lambda c: c.data == "play_solo")
 async def cb_play_solo(call: CallbackQuery):
     data = await get_player_data(call.from_user.id)
@@ -735,7 +740,6 @@ async def cb_start_solo(call: CallbackQuery):
         await finalize_game_db(table)
         await update_table_messages(tid)
 
-# -- Кастомная ставка (СОЛО) --
 @dp.callback_query(lambda c: c.data == "custom_bet")
 async def cb_custom_input(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("✍️ Введите ставку:")
@@ -770,7 +774,6 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
     except:
         await message.answer("Ошибка. Введите целое число > 0")
 
-# ЛОГИКА REPLAY СОЛО
 @dp.callback_query(lambda c: c.data.startswith("replay_"))
 async def cb_replay(call: CallbackQuery):
     tid = call.data.split("_")[1]
@@ -796,7 +799,6 @@ async def cb_replay(call: CallbackQuery):
         await finalize_game_db(table)
         await update_table_messages(tid)
 
-# -- МУЛЬТИПЛЕЕР: СПИСОК СТОЛОВ --
 @dp.callback_query(lambda c: c.data == "play_multi" or c.data == "refresh_multi")
 async def cb_play_multi(call: CallbackQuery):
     waiting_tables = [t for t in tables.values() if t.is_public and t.state == "waiting"]
@@ -805,7 +807,8 @@ async def cb_play_multi(call: CallbackQuery):
     for t in waiting_tables[:5]: 
         owner_name = t.players[0].name if t.players else "Неизвестно"
         players_cnt = len(t.players)
-        btn_text = f"👤 {owner_name} | 👥 {players_cnt}/{MAX_PLAYERS}"
+        safe_name = escape_markdown(owner_name)
+        btn_text = f"👤 {safe_name} | 👥 {players_cnt}/{MAX_PLAYERS}"
         kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"prejoin_{t.id}")])
     
     if not waiting_tables:
@@ -827,7 +830,6 @@ async def cb_play_multi(call: CallbackQuery):
 async def cb_noop(call: CallbackQuery):
     await call.answer("В данный момент нет открытых столов. Создайте свой!")
 
-# -- 1. Создание стола --
 @dp.callback_query(lambda c: c.data == "create_table_setup")
 async def cb_create_setup(call: CallbackQuery):
     kb = [[InlineKeyboardButton(text=f"💰 {b}", callback_data=f"new_multi_{b}")] for b in BET_OPTIONS]
@@ -863,7 +865,6 @@ async def create_multi_table(call: CallbackQuery, bet: int):
     msg = await call.message.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
     p.message_id = msg.message_id
 
-# -- 2. Присоединение к столу --
 @dp.callback_query(lambda c: c.data.startswith("prejoin_"))
 async def cb_prejoin(call: CallbackQuery):
     tid = call.data.split("_")[1]
@@ -975,7 +976,6 @@ async def cb_join_confirm(call: CallbackQuery):
     
     await update_table_messages(tid)
 
-# -- ГОТОВНОСТЬ (READY) --
 @dp.callback_query(lambda c: c.data.startswith("ready_"))
 async def cb_ready(call: CallbackQuery):
     tid = call.data.split("_")[1]
@@ -997,7 +997,6 @@ async def cb_ready(call: CallbackQuery):
     else:
         await update_table_messages(tid)
 
-# -- РЕВАНШ / СМЕНА СТАВКИ --
 @dp.callback_query(lambda c: c.data.startswith("rematch_") or c.data.startswith("chbet_lobby_"))
 async def cb_rematch_or_change(call: CallbackQuery):
     parts = call.data.split("_")
@@ -1038,7 +1037,6 @@ async def rebet_multi_table(message, tid, bet):
     if not p: return 
     
     p.initial_bet = bet
-    # p.bet = bet  <-- УБРАНО, теперь ставки в Hand
     p.is_ready = False 
     
     if table.state == "finished":
@@ -1067,9 +1065,7 @@ async def cb_multi_rebet(call: CallbackQuery):
     if data['balance'] < bet:
         return await call.answer("Не хватает денег!", show_alert=True)
     
-    # Обновляем ставку
     p.initial_bet = bet
-    # p.bet = bet <-- УБРАНО
     p.is_ready = False 
     
     if table.state == "finished":
@@ -1105,7 +1101,6 @@ async def cb_close_lobby(call: CallbackQuery):
         del tables[tid]
     await cb_play_multi(call)
 
-# -- GAME ACTIONS (UPDATED FOR HANDS) --
 @dp.callback_query(lambda c: c.data.startswith("hit_"))
 async def cb_hit(call: CallbackQuery):
     tid = call.data.split("_")[1]
@@ -1113,7 +1108,6 @@ async def cb_hit(call: CallbackQuery):
     if not table: return await call.answer("Ошибка")
     player = table.get_player(call.from_user.id)
     
-    # Проверка хода (теперь по игроку)
     if not player or table.players[table.current_player_index] != player: 
         return await call.answer("Не твой ход!")
     
@@ -1128,12 +1122,14 @@ async def cb_hit(call: CallbackQuery):
     if hand.value > 21:
         hand.status = "bust"
         await call.answer("Перебор!", show_alert=False)
-        table.process_turns() # Авто-переключение
+        table.process_turns() 
              
     elif hand.value == 21:
         hand.status = "stand"
         await call.answer("21! Стоп.", show_alert=False)
-        table.process_turns() # Авто-переключение
+        table.process_turns() 
+    else:
+        await call.answer() 
         
     if table.state == "finished": await finalize_game_db(table)
     await update_table_messages(tid)
@@ -1153,7 +1149,7 @@ async def cb_stand(call: CallbackQuery):
     player.last_action = "stand" 
     await call.answer("Стоп.")
     
-    table.process_turns() # Авто-переключение
+    table.process_turns() 
     if table.state == "finished": await finalize_game_db(table)
     await update_table_messages(tid)
 
@@ -1167,7 +1163,6 @@ async def cb_double(call: CallbackQuery):
     
     hand = player.current_hand
     
-    # Простая проверка баланса (очень грубая, но безопасная)
     data = await get_player_data(player.user_id)
     if data['balance'] < player.total_bet_on_table + hand.bet: 
          return await call.answer("Не хватает фишек!", show_alert=True)
@@ -1182,11 +1177,10 @@ async def cb_double(call: CallbackQuery):
     
     await call.answer("Удвоение!")
     
-    table.process_turns() # Авто-переключение
+    table.process_turns() 
     if table.state == "finished": await finalize_game_db(table)
     await update_table_messages(tid)
 
-# NEW: SPLIT HANDLER
 @dp.callback_query(lambda c: c.data.startswith("split_"))
 async def cb_split(call: CallbackQuery):
     tid = call.data.split("_")[1]
@@ -1197,12 +1191,10 @@ async def cb_split(call: CallbackQuery):
     
     hand = player.current_hand
     
-    # Проверка баланса на доп ставку
     data = await get_player_data(player.user_id)
     if data['balance'] < player.total_bet_on_table + hand.bet: 
          return await call.answer("Не хватает денег для сплита!", show_alert=True)
     
-    # Выполняем сплит
     table.split_hand(player)
     player.last_action = "split"
     
@@ -1242,7 +1234,6 @@ async def cb_stats(call: CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]])
     )
 
-# ====== CHAT HANDLER ======
 @dp.message(F.text)
 async def process_table_chat(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
@@ -1265,13 +1256,12 @@ async def process_table_chat(message: types.Message, state: FSMContext):
     if target_table:
         target_table.add_chat_message(message.from_user.first_name, message.text)
         await update_table_messages(target_table.id)
-        # ЛОГИРУЕМ ЧАТ
         await log_chat(target_table.id, user_id, message.from_user.username, message.text)
 
 async def main():
     await init_db()
     print("Bot started")
-    asyncio.create_task(check_timeouts_loop()) # Запуск фоновой проверки таймаутов
+    asyncio.create_task(check_timeouts_loop()) 
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
