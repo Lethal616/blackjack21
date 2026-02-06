@@ -146,6 +146,7 @@ class GameTable:
         self.current_player_index = 0
         self.shuffle_alert = False
         self.last_action_time = time.time() # Таймштамп активности
+        self.chat_history = [] # Храним последние сообщения [(name, msg), ...]
 
     def add_player(self, user_id, name, bet):
         player = TablePlayer(user_id, name, bet)
@@ -168,6 +169,13 @@ class GameTable:
                 return p
         return None
     
+    # === ЧАТ ФУНКЦИЯ ===
+    def add_chat_message(self, name, text):
+        clean_text = text[:25] # Обрезаем слишком длинные
+        self.chat_history.append(f"{name}: {clean_text}")
+        if len(self.chat_history) > 3: # Храним только 3 последних
+            self.chat_history.pop(0)
+    
     def check_all_ready(self):
         if not self.players: return False
         return all(p.is_ready for p in self.players)
@@ -179,7 +187,7 @@ class GameTable:
             p.hand = []
             p.is_ready = False 
             p.status = "waiting"
-            p.bet = p.original_bet # Сбрасываем ставку к базовой (фикс бага с x2)
+            p.bet = p.original_bet 
         self.update_activity()
 
     def update_activity(self):
@@ -249,12 +257,9 @@ async def check_timeouts_loop():
         await asyncio.sleep(5) # Проверяем каждые 5 сек
         now = time.time()
         
-        # Копируем values, чтобы не было ошибки изменения словаря во время итерации
         for table in list(tables.values()):
-            # Проверяем только если сейчас ход игрока
             if table.state == "player_turn":
                 if now - table.last_action_time > TURN_TIMEOUT:
-                    # Время вышло!
                     try:
                         current_p = table.players[table.current_player_index]
                         current_p.status = "stand" # Принудительный Stand
@@ -266,11 +271,11 @@ async def check_timeouts_loop():
                         
                         await update_table_messages(table.id)
                         
-                        try: await bot.send_message(current_p.user_id, "⏳ Время хода вышло! Сработал авто-Stand.")
+                        try: await bot.send_message(current_p.user_id, "⏳ Время хода вышло! Авто-Stand.")
                         except: pass
                         
                     except IndexError:
-                        pass # на всякий случай
+                        pass 
 
 # ====== ВИЗУАЛИЗАЦИЯ ======
 
@@ -283,19 +288,21 @@ def render_lobby(table: GameTable):
         status = "✅ Готов" if p.is_ready else "⏳ Ждем..."
         txt += f"{i}. {role} {p.name} — *{p.bet}* 🪙 ({status})\n"
     
+    # Отрисовка чата в лобби
+    if table.chat_history:
+        txt += "\n💬 *Чат:*\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
+    else:
+        txt += "\n💬 (Напишите сообщение боту)"
+
     return txt
 
 def get_lobby_kb(table: GameTable, user_id):
     kb = []
     p = table.get_player(user_id)
     
-    # Кнопка изменения ставки (доступна пока не готов)
     if not p.is_ready:
         kb.append([InlineKeyboardButton(text="✅ Я ГОТОВ", callback_data=f"ready_{table.id}")])
         kb.append([InlineKeyboardButton(text="💰 Изм. ставку", callback_data=f"chbet_lobby_{table.id}")])
-    else:
-        # Если готов - можно отменить готовность через смену ставки или выход
-        pass
     
     kb.append([InlineKeyboardButton(text="🚪 Выйти", callback_data=f"leave_lobby_{table.id}")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
@@ -361,13 +368,21 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
              win = 0
              
         res_text += f" ({win:+})"
-        
+    
+    # === ОТРИСОВКА ЧАТА ===
+    chat_section = ""
+    if table.chat_history:
+        chat_section = "\n\n💬 *Чат стола:*\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
+    else:
+        chat_section = "\n\n💬 *Чат:* (Напишите сообщение боту)"
+
     text = (
         f"{dealer_str}\n"
         f"{players_str}\n"
         f"{shoe}{shuffle_note}"
         f"{res_text}"
         f"{balance_display}"
+        f"{chat_section}"
     )
     return text
 
@@ -965,6 +980,30 @@ async def cb_stats(call: CallbackQuery):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]])
     )
+
+# ====== CHAT HANDLER ======
+@dp.message(F.text)
+async def process_table_chat(message: types.Message, state: FSMContext):
+    # Если игрок находится в состоянии ввода ставки, игнорируем чат
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
+    user_id = message.from_user.id
+    target_table = None
+    
+    # Ищем, за каким столом сидит пользователь
+    for table in tables.values():
+        if table.get_player(user_id):
+            target_table = table
+            break
+            
+    if target_table:
+        # Добавляем сообщение
+        target_table.add_chat_message(message.from_user.first_name, message.text)
+        
+        # Обновляем стол
+        await update_table_messages(target_table.id)
 
 async def main():
     await init_db()
