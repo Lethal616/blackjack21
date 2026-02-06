@@ -4,7 +4,7 @@ import random
 import asyncpg
 import uuid
 import time
-import json # Для сохранения карт в JSON
+import json 
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -55,7 +55,6 @@ async def init_db():
                 max_win INTEGER DEFAULT 0
             )
         """)
-        # Миграция: добавляем username, если его нет
         try:
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
         except: pass
@@ -66,14 +65,19 @@ async def init_db():
                 id SERIAL PRIMARY KEY,
                 table_id TEXT,
                 user_id BIGINT,
+                username TEXT, -- Добавили сюда
                 bet INTEGER,
-                result TEXT, -- win, loss, push, blackjack
-                win_amount INTEGER, -- сколько чистыми получил/потерял
+                result TEXT, 
+                win_amount INTEGER, 
                 player_hand TEXT,
                 dealer_hand TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        # Миграция: добавляем username в логи, если таблица уже есть
+        try:
+            await conn.execute("ALTER TABLE game_logs ADD COLUMN IF NOT EXISTS username TEXT")
+        except: pass
         
         # Таблица логов чата
         await conn.execute("""
@@ -98,14 +102,14 @@ async def get_player_data(user_id, username=None):
                 "INSERT INTO users (user_id, username, balance, max_balance, max_win) VALUES ($1, $2, $3, $3, 0) ON CONFLICT (user_id) DO NOTHING",
                 user_id, username, 1000
             )
-            return {"balance": 1000, "stats": {"games":0, "wins":0, "losses":0, "pushes":0, "blackjacks":0, "max_balance":1000, "max_win":0}}
+            return {"balance": 1000, "username": username, "stats": {"games":0, "wins":0, "losses":0, "pushes":0, "blackjacks":0, "max_balance":1000, "max_win":0}}
         
-        # Обновляем юзернейм, если он изменился или был None
         if username and row['username'] != username:
              await conn.execute("UPDATE users SET username = $2 WHERE user_id = $1", user_id, username)
         
         return {
             "balance": row["balance"],
+            "username": row["username"], # Возвращаем username из БД
             "stats": {
                 "games": row["games"], "wins": row["wins"], "losses": row["losses"],
                 "pushes": row["pushes"], "blackjacks": row["blackjacks"],
@@ -123,12 +127,12 @@ async def update_player_stats(user_id, balance, stats):
         """, user_id, balance, stats["games"], stats["wins"], stats["losses"], 
            stats["pushes"], stats["blackjacks"], stats["max_balance"], stats["max_win"])
 
-async def log_game(table_id, user_id, bet, result, win_amount, p_hand, d_hand):
+async def log_game(table_id, user_id, username, bet, result, win_amount, p_hand, d_hand):
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO game_logs (table_id, user_id, bet, result, win_amount, player_hand, dealer_hand)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-        """, table_id, user_id, bet, result, win_amount, str(p_hand), str(d_hand))
+            INSERT INTO game_logs (table_id, user_id, username, bet, result, win_amount, player_hand, dealer_hand)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        """, table_id, user_id, username, bet, result, win_amount, str(p_hand), str(d_hand))
 
 async def log_chat(table_id, user_id, username, message):
     async with pool.acquire() as conn:
@@ -527,7 +531,8 @@ async def finalize_game_db(table: GameTable):
     d_val = table._hand_value(table.dealer_hand)
     
     for p in table.players:
-        data = await get_player_data(p.user_id)
+        data = await get_player_data(p.user_id) # ТУТ МЫ ПОЛУЧАЕМ И USERNAME ИЗ БАЗЫ
+        p_username = data.get('username', 'Unknown')
         stats = data['stats']
         bal = data['balance']
         
@@ -562,8 +567,8 @@ async def finalize_game_db(table: GameTable):
         if win_amount > 0: stats['max_win'] = max(stats['max_win'], win_amount)
             
         await update_player_stats(p.user_id, new_bal, stats)
-        # ЛОГИРУЕМ ИГРУ
-        await log_game(table.id, p.user_id, p.bet, result_type, win_amount, p.hand, table.dealer_hand)
+        # ЛОГИРУЕМ ИГРУ С ЮЗЕРНЕЙМОМ
+        await log_game(table.id, p.user_id, p_username, p.bet, result_type, win_amount, p.hand, table.dealer_hand)
 
 # ====== ХЕНДЛЕРЫ ======
 
