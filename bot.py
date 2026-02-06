@@ -120,7 +120,8 @@ class TablePlayer:
         self.status = "waiting" # waiting, playing, stand, bust, blackjack
         self.is_ready = False 
         self.message_id = None 
-        self.start_balance = start_balance 
+        self.start_balance = start_balance
+        self.last_action = None # NEW: Храним последнее действие для визуала
 
     @property
     def value(self):
@@ -173,7 +174,6 @@ class GameTable:
     def add_chat_message(self, name, text):
         clean_text = text[:30] 
         self.chat_history.append(f"{name}: {clean_text}")
-        # FIX: Увеличили лимит до 5 сообщений
         if len(self.chat_history) > 5: 
             self.chat_history.pop(0)
     
@@ -189,6 +189,7 @@ class GameTable:
             p.is_ready = False 
             p.status = "waiting"
             p.bet = p.original_bet 
+            p.last_action = None # Сброс действия
         self.update_activity()
 
     def update_activity(self):
@@ -210,6 +211,7 @@ class GameTable:
             p.bet = p.original_bet 
             p.hand = []
             p.status = "playing"
+            p.last_action = None
             c1, s1 = self.deck.get_card()
             c2, s2 = self.deck.get_card()
             p.hand = [c1, c2]
@@ -223,11 +225,11 @@ class GameTable:
         self.process_turns() 
 
     def process_turns(self):
-        self.update_activity() # Обновляем таймер при смене хода
+        self.update_activity() 
         while self.current_player_index < len(self.players):
             p = self.players[self.current_player_index]
             if p.status == "playing":
-                return # Ждем хода этого игрока
+                return 
             self.current_player_index += 1
         
         self.state = "dealer_turn"
@@ -253,7 +255,6 @@ class GameTable:
 tables = {} 
 
 def leave_all_tables(user_id, exclude_tid=None):
-    """Гарантирует, что игрок не сидит за другими столами"""
     for tid in list(tables.keys()):
         if tid == exclude_tid: continue
         table = tables.get(tid)
@@ -262,7 +263,7 @@ def leave_all_tables(user_id, exclude_tid=None):
             if not table.players:
                 del tables[tid]
 
-# ====== ФОНОВАЯ ЗАДАЧА: ПРОВЕРКА ТАЙМАУТОВ ======
+# ====== ФОНОВАЯ ЗАДАЧА ======
 async def check_timeouts_loop():
     while True:
         await asyncio.sleep(5) 
@@ -274,6 +275,7 @@ async def check_timeouts_loop():
                     try:
                         current_p = table.players[table.current_player_index]
                         current_p.status = "stand" 
+                        current_p.last_action = "stand" # FIX: помечаем авто-стенд
                         
                         table.process_turns()
                         
@@ -288,7 +290,7 @@ async def check_timeouts_loop():
                     except IndexError:
                         pass 
 
-# ====== ВИЗУАЛИЗАЦИЯ ======
+# ====== ВИЗУАЛИЗАЦИЯ (СТАТУСЫ И ИКОНКИ ДЕЙСТВИЙ) ======
 
 def render_lobby(table: GameTable):
     txt = f"🎰 *BLACKJACK TABLE #{table.id}*\n"
@@ -296,7 +298,7 @@ def render_lobby(table: GameTable):
     
     for i, p in enumerate(table.players, 1):
         role = "👑" if p.user_id == table.owner_id else "👤"
-        status = "✅" if p.is_ready else "⏳"
+        status = "✅ ГОТОВ" if p.is_ready else "⏳ НЕ ГОТОВ"
         txt += f"{status} {role} *{p.name}* — {p.bet} 🪙\n"
     
     txt += f"───────────────\n"
@@ -341,12 +343,22 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
     for p in table.players:
         status_marker = "💤"
         status_text = ""
-        
+        action_trail = "" # Иконка последнего действия
+
+        # Отображение действия
+        if p.last_action == "hit": action_trail = " (🤏 HIT)"
+        elif p.last_action == "stand": action_trail = " (✋ STAND)"
+        elif p.last_action == "double": action_trail = " (2️⃣ DOUBLE)"
+
         if table.state == "player_turn":
             if table.players[table.current_player_index] == p:
-                status_marker = "🟢" 
+                status_marker = "⏳" # Песочные часы для того, кто ходит
+                action_trail = " (🤔 ДУМАЕТ...)" # Перекрываем прошлое действие текущим статусом
             elif table.players.index(p) > table.current_player_index:
-                status_marker = "⏳" 
+                status_marker = "💤" # Спит
+                action_trail = " (💤 ЖДЕТ)"
+            else:
+                status_marker = "✅" # Уже сходил
         elif table.state == "finished":
              d_val = table._hand_value(table.dealer_hand)
              if p.status == "bust": 
@@ -366,7 +378,8 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
                  status_text = "   _❌ ПРОИГРЫШ_"
 
         is_me = " (Вы)" if p.user_id == player.user_id else ""
-        name_line = f"{status_marker} *{p.name}*{is_me} • {p.bet}💰"
+        # FIX: Добавлен action_trail в строку имени
+        name_line = f"{status_marker} *{p.name}*{is_me}{action_trail} • {p.bet}💰"
         cards_line = f"   {p.render_hand()}  ➡️ *{p.value}*"
         
         full_status_line = f"\n{status_text}" if status_text else ""
@@ -390,11 +403,9 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         f"🃏 Шу: {shoe_bar}{shuffle_alert}"
     )
 
-    # FIX: Добавлена постоянная секция чата с подсказкой
     chat_section = "\n───────────────\n"
     if table.chat_history:
         chat_section += "\n".join([f"▫️ {msg}" for msg in table.chat_history]) + "\n"
-    
     chat_section += "✎ _Напишите сообщение в этот чат_"
 
     final_text = (
@@ -939,7 +950,8 @@ async def cb_hit(call: CallbackQuery):
     c, s = table.deck.get_card()
     if s: table.shuffle_alert = True
     player.hand.append(c)
-    
+    player.last_action = "hit" # FIX: сохраняем действие
+
     if player.value > 21:
         player.status = "bust"
         await call.answer("Перебор!", show_alert=False)
@@ -961,6 +973,7 @@ async def cb_stand(call: CallbackQuery):
     if not player or table.players[table.current_player_index] != player: return await call.answer("Не твой ход!")
         
     player.status = "stand"
+    player.last_action = "stand" # FIX: сохраняем действие
     await call.answer("Стоп.")
     table.process_turns()
     if table.state == "finished": await finalize_game_db(table)
@@ -980,6 +993,8 @@ async def cb_double(call: CallbackQuery):
     player.bet *= 2
     c, s = table.deck.get_card()
     player.hand.append(c)
+    player.last_action = "double" # FIX: сохраняем действие
+    
     if player.value > 21: player.status = "bust"
     else: player.status = "stand"
     
