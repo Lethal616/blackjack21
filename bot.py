@@ -106,9 +106,10 @@ class CardSystem:
 
     def get_visual_bar(self):
         percent = len(self.shoe) / TOTAL_CARDS
-        blocks = int(percent * 10)
-        bar = "▓" * blocks + "░" * (10 - blocks)
-        return f"🎴 Колода: {bar} ({int(percent * 100)}%)"
+        # Визуально более чистый бар
+        blocks = int(percent * 8)
+        bar = "▰" * blocks + "▱" * (8 - blocks)
+        return f"{bar} {int(percent * 100)}%"
 
 class TablePlayer:
     def __init__(self, user_id, name, bet, start_balance):
@@ -120,7 +121,7 @@ class TablePlayer:
         self.status = "waiting" # waiting, playing, stand, bust, blackjack
         self.is_ready = False 
         self.message_id = None 
-        self.start_balance = start_balance # Запоминаем баланс при входе за стол
+        self.start_balance = start_balance 
 
     @property
     def value(self):
@@ -132,8 +133,9 @@ class TablePlayer:
         return val
 
     def render_hand(self):
-        if not self.hand: return "(нет карт)"
-        return "  ".join(f"`{r}{s}`" for r, s in self.hand)
+        if not self.hand: return ""
+        # Обновленный стиль карт: [A♠️]
+        return " ".join(f"`[{r}{s}]`" for r, s in self.hand)
 
 class GameTable:
     def __init__(self, table_id, is_public=False, owner_id=None):
@@ -146,7 +148,7 @@ class GameTable:
         self.state = "waiting" # waiting, player_turn, dealer_turn, finished
         self.current_player_index = 0
         self.shuffle_alert = False
-        self.last_action_time = time.time() # Таймштамп активности
+        self.last_action_time = time.time()
         self.chat_history = [] 
 
     def add_player(self, user_id, name, bet, current_balance):
@@ -171,7 +173,7 @@ class GameTable:
         return None
     
     def add_chat_message(self, name, text):
-        clean_text = text[:25] 
+        clean_text = text[:30] # Чуть больше символов
         self.chat_history.append(f"{name}: {clean_text}")
         if len(self.chat_history) > 3: 
             self.chat_history.pop(0)
@@ -277,21 +279,26 @@ async def check_timeouts_loop():
                     except IndexError:
                         pass 
 
-# ====== ВИЗУАЛИЗАЦИЯ ======
+# ====== ВИЗУАЛИЗАЦИЯ (PREMIUM UI) ======
 
 def render_lobby(table: GameTable):
-    txt = f"🎲 *Стол #{table.id}* (Ожидание)\n"
-    txt += f"👥 Игроков: {len(table.players)}/{MAX_PLAYERS}\n\n"
+    # Премиум хедер лобби
+    txt = f"🎰 *BLACKJACK TABLE #{table.id}*\n"
+    txt += f"───────────────\n"
     
     for i, p in enumerate(table.players, 1):
         role = "👑" if p.user_id == table.owner_id else "👤"
-        status = "✅ Готов" if p.is_ready else "⏳ Ждем..."
-        txt += f"{i}. {role} {p.name} — *{p.bet}* 🪙 ({status})\n"
+        status = "✅" if p.is_ready else "⏳"
+        # Более чистое отображение списка
+        txt += f"{status} {role} *{p.name}* — {p.bet} 🪙\n"
+    
+    txt += f"───────────────\n"
+    txt += f"👥 Мест: {len(table.players)}/{MAX_PLAYERS}\n"
     
     if table.chat_history:
-        txt += "\n💬 *Чат:*\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
+        txt += "\n💬 *LIVE CHAT:*\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
     else:
-        txt += "\n💬 (Напишите сообщение боту)"
+        txt += "\n💬 (Напишите сообщение...)"
 
     return txt
 
@@ -307,100 +314,108 @@ def get_lobby_kb(table: GameTable, user_id):
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bot):
+    # 1. Хедер Дилера
     if table.state == "finished":
         d_val = table._hand_value(table.dealer_hand)
-        dealer_str = f"🤵 Дилер:  {'  '.join(f'`{r}{s}`' for r,s in table.dealer_hand)}  (*{d_val}*)"
+        # Открытые карты
+        d_cards = " ".join(f"`[{r}{s}]`" for r,s in table.dealer_hand)
+        dealer_section = (
+            f"🤵 *DEALER* ({d_val})\n"
+            f"{d_cards}\n"
+        )
     else:
-        dealer_str = f"🤵 Дилер:  `{table.dealer_hand[0][0]}{table.dealer_hand[0][1]}`  `❓`"
+        # Скрытая карта
+        visible = table.dealer_hand[0]
+        d_cards = f"`[{visible[0]}{visible[1]}]` `[ ?? ]`"
+        dealer_section = (
+            f"🤵 *DEALER*\n"
+            f"{d_cards}\n"
+        )
 
-    players_str = ""
+    # 2. Секция Игроков
+    players_section = ""
     for p in table.players:
-        marker = "⏳"
+        # Индикатор состояния
+        status_marker = "💤"
         if table.state == "player_turn":
             if table.players[table.current_player_index] == p:
-                marker = f"👈 *ХОДИТ* ({TURN_TIMEOUT}с)"
+                status_marker = "🟢" # Активный игрок
             elif table.players.index(p) > table.current_player_index:
-                marker = "💤"
-            else:
-                marker = ""
-        
-        name_display = "🧑 Ты" if p.user_id == player.user_id else f"👤 {p.name}"
-        
-        status_icon = ""
-        if p.status == "blackjack": status_icon = "🃏 BJ!"
-        elif p.status == "bust": status_icon = "💀 Перебор"
-        elif p.status == "stand": status_icon = "✋"
-        
-        players_str += f"{name_display} ({p.bet}💰): {p.render_hand()} (*{p.value}*) {status_icon} {marker}\n"
+                status_marker = "⏳" # Ждет очереди
+        elif table.state == "finished":
+             # Иконки результатов
+             d_val = table._hand_value(table.dealer_hand)
+             if p.status == "bust": status_marker = "💀"
+             elif p.status == "blackjack": status_marker = "🔥"
+             elif d_val > 21 or (p.value <= 21 and p.value > d_val): status_marker = "🏆"
+             elif p.value == d_val: status_marker = "🤝"
+             else: status_marker = "❌"
 
-    shoe = table.deck.get_visual_bar()
-    shuffle_note = "\n\n_🔄 Колода перемешана_" if table.shuffle_alert else ""
-    
-    res_text = ""
+        # Форматирование строки игрока
+        is_me = " (Вы)" if p.user_id == player.user_id else ""
+        name_line = f"{status_marker} *{p.name}*{is_me} • {p.bet}💰"
+        
+        # Рука игрока
+        cards_line = f"   {p.render_hand()}  ➡️ *{p.value}*"
+        
+        players_section += f"{name_line}\n{cards_line}\n\n"
+
+    # 3. Инфо (Колода + Баланс)
     p_data = await get_player_data(player.user_id)
-    
-    # === РАСЧЕТ ПРОФИТА СЕССИИ ===
     current_balance = p_data['balance']
-    # Находим нашего игрока в объекте стола, чтобы узнать его start_balance
     my_p_obj = table.get_player(player.user_id)
     session_diff = 0
     if my_p_obj:
         session_diff = current_balance - my_p_obj.start_balance
     
     diff_str = f"+{session_diff}" if session_diff > 0 else f"{session_diff}"
-    balance_display = f"\n🪙 Баланс: *{current_balance}* ({diff_str})"
     
+    shoe_bar = table.deck.get_visual_bar()
+    shuffle_alert = " 🔄 SHUFFLE" if table.shuffle_alert else ""
+    
+    info_section = (
+        f"───────────────\n"
+        f"👝 Баланс: *{current_balance}* ({diff_str})\n"
+        f"🃏 Шу: {shoe_bar}{shuffle_alert}"
+    )
+
+    # 4. Результат (только если конец игры)
+    result_overlay = ""
     if table.state == "finished":
-        d_val = table._hand_value(table.dealer_hand)
-        win = 0
-        if player.status == "bust":
-            res_text = "\n❌ *Перебор / Проигрыш*"
-            win = -player.bet
-        elif player.status == "blackjack":
-            if d_val != 21 or len(table.dealer_hand) != 2:
-                res_text = "\n🃏 *BLACKJACK! Победа!*"
-                win = int(player.bet * 1.5)
-            else:
-                res_text = "\n🤝 *Ничья*"
-                win = 0
-        elif d_val > 21:
-             res_text = "\n✅ *Дилер сгорел! Победа!*"
-             win = player.bet
-        elif player.value > d_val:
-             res_text = "\n✅ *Победа!*"
-             win = player.bet
-        elif player.value < d_val:
-             res_text = "\n❌ *Дилер выиграл*"
-             win = -player.bet
-        else:
-             res_text = "\n🤝 *Ничья*"
-             win = 0
-             
-        res_text += f" ({win:+})"
-    
+         # Определяем исход для конкретного игрока, чтобы вывести крупный текст
+         d_val = table._hand_value(table.dealer_hand)
+         if player.status == "bust": result_overlay = "\n💀 *ПЕРЕБОР*"
+         elif player.status == "blackjack": result_overlay = "\n🔥 *BLACKJACK!*"
+         elif d_val > 21: result_overlay = "\n🏆 *ДИЛЕР СГОРЕЛ!*"
+         elif player.value > d_val: result_overlay = "\n🏆 *ПОБЕДА!*"
+         elif player.value < d_val: result_overlay = "\n❌ *ПРОИГРЫШ*"
+         else: result_overlay = "\n🤝 *НИЧЬЯ*"
+
+    # 5. Чат
     chat_section = ""
     if table.chat_history:
-        chat_section = "\n\n💬 *Чат стола:*\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
-    else:
-        chat_section = "\n\n💬 *Чат:* (Напишите сообщение боту)"
+        chat_section = "\n───────────────\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
 
-    text = (
-        f"{dealer_str}\n"
-        f"{players_str}\n"
-        f"{shoe}{shuffle_note}"
-        f"{res_text}"
-        f"{balance_display}"
+    # СБОРКА ВСЕГО
+    final_text = (
+        f"🎰 *TABLE #{table.id}*\n"
+        f"───────────────\n"
+        f"{dealer_section}"
+        f"───────────────\n"
+        f"{players_section}"
+        f"{info_section}"
+        f"{result_overlay}"
         f"{chat_section}"
     )
-    return text
+    
+    return final_text
 
 def get_game_kb(table: GameTable, player: TablePlayer):
     if table.state == "finished":
         if not table.is_public:
-            # === ФИКС ЗДЕСЬ ===
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"replay_{table.id}")],
-                [InlineKeyboardButton(text="💰 Изм. ставку", callback_data="play_solo")], # Сброс в меню выбора
+                [InlineKeyboardButton(text="💰 Изм. ставку", callback_data="play_solo")],
                 [InlineKeyboardButton(text="🚪 Меню", callback_data="menu")]
             ])
         else:
@@ -965,7 +980,6 @@ async def cb_stats(call: CallbackQuery):
     total_games = s['games']
     win_rate = round((s['wins'] / total_games * 100), 1) if total_games > 0 else 0
     
-    # Считаем общий профит (Текущий баланс - 1000)
     net_profit = data['balance'] - 1000
     net_str = f"+{net_profit}" if net_profit > 0 else f"{net_profit}"
 
