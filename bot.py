@@ -278,7 +278,7 @@ async def check_timeouts_loop():
                     except IndexError:
                         pass 
 
-# ====== ВИЗУАЛИЗАЦИЯ (NO BRACKETS, CLEAR STATUS) ======
+# ====== ВИЗУАЛИЗАЦИЯ (DEALER SUM ADDED) ======
 
 def render_lobby(table: GameTable):
     txt = f"🎰 *BLACKJACK TABLE #{table.id}*\n"
@@ -321,10 +321,13 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         )
     else:
         visible = table.dealer_hand[0]
+        # FIX: считаем очки видимой карты
+        vis_val = table._hand_value([visible])
+        
         # FIX: Убраны скобки
         d_cards = f"`{visible[0]}{visible[1]}` `??`"
         dealer_section = (
-            f"🤵 *DEALER*\n"
+            f"🤵 *DEALER* ({vis_val})\n" # Добавлено отображение суммы
             f"{d_cards}\n"
         )
 
@@ -383,9 +386,6 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         f"👝 Баланс: *{current_balance}* ({diff_str})\n"
         f"🃏 Шу: {shoe_bar}{shuffle_alert}"
     )
-
-    result_overlay = ""
-    # Мы перенесли результат под имя игрока, поэтому отдельный overlay убрали, чтобы не дублировать
 
     chat_section = ""
     if table.chat_history:
