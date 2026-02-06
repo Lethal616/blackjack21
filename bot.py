@@ -4,6 +4,8 @@ import random
 import asyncpg
 import uuid
 import time
+import json # Для сохранения карт в JSON
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -29,7 +31,7 @@ TOTAL_CARDS = 52 * DECKS_COUNT
 RESHUFFLE_THRESHOLD = 60
 BET_OPTIONS = [50, 100, 250]
 MAX_PLAYERS = 3
-TURN_TIMEOUT = 30 # Секунд на ход
+TURN_TIMEOUT = 30 
 
 # ====== БАЗА ДАННЫХ ======
 pool = None
@@ -38,9 +40,11 @@ async def init_db():
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL)
     async with pool.acquire() as conn:
+        # Таблица пользователей
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
+                username TEXT, 
                 balance INTEGER DEFAULT 1000,
                 games INTEGER DEFAULT 0,
                 wins INTEGER DEFAULT 0,
@@ -51,21 +55,54 @@ async def init_db():
                 max_win INTEGER DEFAULT 0
             )
         """)
+        # Миграция: добавляем username, если его нет
         try:
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_win INTEGER DEFAULT 0")
-        except asyncpg.exceptions.DuplicateColumnError:
-            pass
-    print("Database initialized")
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
+        except: pass
 
-async def get_player_data(user_id):
+        # Таблица логов игр
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS game_logs (
+                id SERIAL PRIMARY KEY,
+                table_id TEXT,
+                user_id BIGINT,
+                bet INTEGER,
+                result TEXT, -- win, loss, push, blackjack
+                win_amount INTEGER, -- сколько чистыми получил/потерял
+                player_hand TEXT,
+                dealer_hand TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # Таблица логов чата
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_logs (
+                id SERIAL PRIMARY KEY,
+                table_id TEXT,
+                user_id BIGINT,
+                username TEXT,
+                message TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+    print("Database initialized with logs and usernames")
+
+async def get_player_data(user_id, username=None):
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+        
         if not row:
             await conn.execute(
-                "INSERT INTO users (user_id, balance, max_balance, max_win) VALUES ($1, $2, $2, 0) ON CONFLICT DO NOTHING",
-                user_id, 1000
+                "INSERT INTO users (user_id, username, balance, max_balance, max_win) VALUES ($1, $2, $3, $3, 0) ON CONFLICT (user_id) DO NOTHING",
+                user_id, username, 1000
             )
             return {"balance": 1000, "stats": {"games":0, "wins":0, "losses":0, "pushes":0, "blackjacks":0, "max_balance":1000, "max_win":0}}
+        
+        # Обновляем юзернейм, если он изменился или был None
+        if username and row['username'] != username:
+             await conn.execute("UPDATE users SET username = $2 WHERE user_id = $1", user_id, username)
         
         return {
             "balance": row["balance"],
@@ -85,6 +122,20 @@ async def update_player_stats(user_id, balance, stats):
             WHERE user_id = $1
         """, user_id, balance, stats["games"], stats["wins"], stats["losses"], 
            stats["pushes"], stats["blackjacks"], stats["max_balance"], stats["max_win"])
+
+async def log_game(table_id, user_id, bet, result, win_amount, p_hand, d_hand):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO game_logs (table_id, user_id, bet, result, win_amount, player_hand, dealer_hand)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """, table_id, user_id, bet, result, win_amount, str(p_hand), str(d_hand))
+
+async def log_chat(table_id, user_id, username, message):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO chat_logs (table_id, user_id, username, message)
+            VALUES ($1, $2, $3, $4)
+        """, table_id, user_id, username, message)
 
 # ====== ЛОГИКА ИГРЫ (КЛАССЫ) ======
 
@@ -121,7 +172,7 @@ class TablePlayer:
         self.is_ready = False 
         self.message_id = None 
         self.start_balance = start_balance
-        self.last_action = None # NEW: Храним последнее действие для визуала
+        self.last_action = None 
 
     @property
     def value(self):
@@ -189,7 +240,7 @@ class GameTable:
             p.is_ready = False 
             p.status = "waiting"
             p.bet = p.original_bet 
-            p.last_action = None # Сброс действия
+            p.last_action = None 
         self.update_activity()
 
     def update_activity(self):
@@ -275,7 +326,7 @@ async def check_timeouts_loop():
                     try:
                         current_p = table.players[table.current_player_index]
                         current_p.status = "stand" 
-                        current_p.last_action = "stand" # FIX: помечаем авто-стенд
+                        current_p.last_action = "stand" 
                         
                         table.process_turns()
                         
@@ -290,7 +341,7 @@ async def check_timeouts_loop():
                     except IndexError:
                         pass 
 
-# ====== ВИЗУАЛИЗАЦИЯ (СТАТУСЫ И ИКОНКИ ДЕЙСТВИЙ) ======
+# ====== ВИЗУАЛИЗАЦИЯ ======
 
 def render_lobby(table: GameTable):
     txt = f"🎰 *BLACKJACK TABLE #{table.id}*\n"
@@ -343,22 +394,21 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
     for p in table.players:
         status_marker = "💤"
         status_text = ""
-        action_trail = "" # Иконка последнего действия
+        action_trail = "" 
 
-        # Отображение действия
         if p.last_action == "hit": action_trail = " (🤏 HIT)"
         elif p.last_action == "stand": action_trail = " (✋ STAND)"
         elif p.last_action == "double": action_trail = " (2️⃣ DOUBLE)"
 
         if table.state == "player_turn":
             if table.players[table.current_player_index] == p:
-                status_marker = "⏳" # Песочные часы для того, кто ходит
-                action_trail = " (🤔 ДУМАЕТ...)" # Перекрываем прошлое действие текущим статусом
+                status_marker = "⏳" 
+                action_trail = " (🤔 ДУМАЕТ...)" 
             elif table.players.index(p) > table.current_player_index:
-                status_marker = "💤" # Спит
+                status_marker = "💤" 
                 action_trail = " (💤 ЖДЕТ)"
             else:
-                status_marker = "✅" # Уже сходил
+                status_marker = "✅" 
         elif table.state == "finished":
              d_val = table._hand_value(table.dealer_hand)
              if p.status == "bust": 
@@ -378,7 +428,6 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
                  status_text = "   _❌ ПРОИГРЫШ_"
 
         is_me = " (Вы)" if p.user_id == player.user_id else ""
-        # FIX: Добавлен action_trail в строку имени
         name_line = f"{status_marker} *{p.name}*{is_me}{action_trail} • {p.bet}💰"
         cards_line = f"   {p.render_hand()}  ➡️ *{p.value}*"
         
@@ -482,23 +531,30 @@ async def finalize_game_db(table: GameTable):
         stats = data['stats']
         bal = data['balance']
         
+        result_type = "loss"
         win_amount = 0
+        
         if p.status == "bust":
             win_amount = -p.bet
             stats['losses'] += 1
+            result_type = "loss"
         elif p.status == "blackjack":
              win_amount = int(p.bet * 1.5)
              stats['wins'] += 1
              stats['blackjacks'] += 1
+             result_type = "blackjack"
         elif d_val > 21 or p.value > d_val:
             win_amount = p.bet
             stats['wins'] += 1
+            result_type = "win"
         elif p.value < d_val:
             win_amount = -p.bet
             stats['losses'] += 1
+            result_type = "loss"
         else:
             win_amount = 0
             stats['pushes'] += 1
+            result_type = "push"
 
         new_bal = bal + win_amount
         stats['games'] += 1
@@ -506,6 +562,8 @@ async def finalize_game_db(table: GameTable):
         if win_amount > 0: stats['max_win'] = max(stats['max_win'], win_amount)
             
         await update_player_stats(p.user_id, new_bal, stats)
+        # ЛОГИРУЕМ ИГРУ
+        await log_game(table.id, p.user_id, p.bet, result_type, win_amount, p.hand, table.dealer_hand)
 
 # ====== ХЕНДЛЕРЫ ======
 
@@ -518,7 +576,8 @@ class MultiCustomBet(StatesGroup):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    data = await get_player_data(message.from_user.id)
+    # Передаем username при старте
+    data = await get_player_data(message.from_user.id, message.from_user.username)
     await message.answer(
         f"🃏 *Blackjack Revolution*\n🪙 Баланс: {data['balance']}",
         parse_mode="Markdown",
@@ -534,7 +593,7 @@ def main_menu_kb():
 
 @dp.callback_query(lambda c: c.data == "menu")
 async def cb_menu(call: CallbackQuery):
-    data = await get_player_data(call.from_user.id)
+    data = await get_player_data(call.from_user.id, call.from_user.username)
     await call.message.edit_text(f"🪙 Баланс: {data['balance']}", reply_markup=main_menu_kb())
 
 # -- СОЛО --
@@ -950,7 +1009,7 @@ async def cb_hit(call: CallbackQuery):
     c, s = table.deck.get_card()
     if s: table.shuffle_alert = True
     player.hand.append(c)
-    player.last_action = "hit" # FIX: сохраняем действие
+    player.last_action = "hit" 
 
     if player.value > 21:
         player.status = "bust"
@@ -973,7 +1032,7 @@ async def cb_stand(call: CallbackQuery):
     if not player or table.players[table.current_player_index] != player: return await call.answer("Не твой ход!")
         
     player.status = "stand"
-    player.last_action = "stand" # FIX: сохраняем действие
+    player.last_action = "stand" 
     await call.answer("Стоп.")
     table.process_turns()
     if table.state == "finished": await finalize_game_db(table)
@@ -993,7 +1052,7 @@ async def cb_double(call: CallbackQuery):
     player.bet *= 2
     c, s = table.deck.get_card()
     player.hand.append(c)
-    player.last_action = "double" # FIX: сохраняем действие
+    player.last_action = "double" 
     
     if player.value > 21: player.status = "bust"
     else: player.status = "stand"
@@ -1058,6 +1117,8 @@ async def process_table_chat(message: types.Message, state: FSMContext):
     if target_table:
         target_table.add_chat_message(message.from_user.first_name, message.text)
         await update_table_messages(target_table.id)
+        # ЛОГИРУЕМ ЧАТ
+        await log_chat(target_table.id, user_id, message.from_user.username, message.text)
 
 async def main():
     await init_db()
