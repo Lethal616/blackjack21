@@ -397,8 +397,10 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
 def get_game_kb(table: GameTable, player: TablePlayer):
     if table.state == "finished":
         if not table.is_public:
+            # === ФИКС ЗДЕСЬ ===
             return InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔁 Играть еще", callback_data=f"replay_{table.id}")],
+                [InlineKeyboardButton(text="💰 Изм. ставку", callback_data="play_solo")], # Сброс в меню выбора
                 [InlineKeyboardButton(text="🚪 Меню", callback_data="menu")]
             ])
         else:
