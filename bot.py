@@ -164,7 +164,6 @@ class CardSystem:
         bar = "▰" * blocks + "▱" * (8 - blocks)
         return f"{bar} {int(percent * 100)}%"
 
-# NEW: Класс для одной руки (так как теперь их может быть несколько у одного игрока)
 class Hand:
     def __init__(self, bet):
         self.cards = []
@@ -197,14 +196,12 @@ class TablePlayer:
         self.message_id = None 
         self.last_action = None 
 
-    # Помощник для получения текущей руки
     @property
     def current_hand(self):
         if 0 <= self.current_hand_index < len(self.hands):
             return self.hands[self.current_hand_index]
         return None
 
-    # Общая ставка на столе (для проверок баланса)
     @property
     def total_bet_on_table(self):
         return sum(h.bet for h in self.hands)
@@ -274,7 +271,6 @@ class GameTable:
         self.dealer_hand = []
         self.shuffle_alert = False
         
-        # Раздача дилеру
         c, s = self.deck.get_card()
         if s: self.shuffle_alert = True
         self.dealer_hand.append(c)
@@ -283,10 +279,8 @@ class GameTable:
         if s: self.shuffle_alert = True
         self.dealer_hand.append(c)
 
-        # Раздача игрокам
         for p in self.players:
             p.reset()
-            # Создаем первую руку
             first_hand = Hand(p.initial_bet)
             c1, s1 = self.deck.get_card()
             c2, s2 = self.deck.get_card()
@@ -303,20 +297,15 @@ class GameTable:
         self.current_player_index = 0
         self.process_turns() 
 
-    # NEW: Логика разделения
     def split_hand(self, player):
         current_h = player.current_hand
-        # Создаем вторую руку с такой же ставкой
         new_hand = Hand(current_h.bet)
         
-        # Забираем вторую карту из первой руки
         card_to_move = current_h.cards.pop()
         new_hand.cards.append(card_to_move)
         
-        # Добавляем новую руку в список
         player.hands.insert(player.current_hand_index + 1, new_hand)
         
-        # Раздаем по одной карте в каждую руку
         c1, s1 = self.deck.get_card()
         current_h.cards.append(c1)
         
@@ -325,31 +314,27 @@ class GameTable:
         
         if s1 or s2: self.shuffle_alert = True
         
-        # Проверка на 21 после сплита (это не считается блэкджеком обычно, просто 21)
-        # Но для простоты оставим статус playing
-        if current_h.value == 21:
-             current_h.status = "stand" # Автостенд на 21
-        if new_hand.value == 21:
-             new_hand.status = "stand"
+        # Автостенд, если пришло 21 (но не блэкджек)
+        if current_h.value == 21: current_h.status = "stand"
+        if new_hand.value == 21: new_hand.status = "stand"
 
+    # ИСПРАВЛЕННАЯ ЛОГИКА ПЕРЕКЛЮЧЕНИЯ
     def process_turns(self):
         self.update_activity() 
         
-        # Ищем игрока и руку, которая еще играет
         while self.current_player_index < len(self.players):
             p = self.players[self.current_player_index]
             
-            # Проверяем текущую руку игрока
+            # Ищем руку, которая еще играет
             while p.current_hand_index < len(p.hands):
                 hand = p.hands[p.current_hand_index]
                 if hand.status == "playing":
-                    return # Нашли активную руку, ждем действия
-                p.current_hand_index += 1 # Эта рука закончена, следующая
+                    return # Нашли активную руку, останавливаемся тут
+                p.current_hand_index += 1 # Эта рука все, переходим к следующей
             
-            # Все руки этого игрока закончены, переходим к следующему игроку
+            # Все руки игрока сыграны
             self.current_player_index += 1
         
-        # Все игроки закончили
         self.state = "dealer_turn"
         self.play_dealer()
 
@@ -564,7 +549,6 @@ def get_game_kb(table: GameTable, player: TablePlayer):
     if current_p != player:
         return None 
     
-    # Кнопки для АКТИВНОЙ руки
     hand = player.current_hand
     if not hand: return None
 
@@ -573,25 +557,15 @@ def get_game_kb(table: GameTable, player: TablePlayer):
          InlineKeyboardButton(text="✋ STAND", callback_data=f"stand_{table.id}")]
     ]
     
-    # Доп кнопки только если 2 карты
     if len(hand.cards) == 2:
         extra_row = []
-        
-        # DOUBLE
-        # Проверяем баланс: нужно чтобы на счету было больше, чем сумма ставок всех рук + ставка этой руки
-        # (упрощенно: просто проверяем, есть ли деньги на дабл)
-        # Реальный баланс игрока хранится в БД, мы не кешируем его постоянно, но знаем total_bet_on_table
-        # Для скорости проверим просто наличие средств > ставки
         extra_row.append(InlineKeyboardButton(text="2️⃣ x2", callback_data=f"double_{table.id}"))
         
-        # SPLIT
-        # Условия: 2 карты, номинал совпадает (или обе стоят 10), первая рука (обычно сплит только один раз разрешаем для простоты)
         c1 = hand.cards[0]
         c2 = hand.cards[1]
         val1 = 10 if c1[0] in "JQK10" else (11 if c1[0] == "A" else int(c1[0]))
         val2 = 10 if c2[0] in "JQK10" else (11 if c2[0] == "A" else int(c2[0]))
         
-        # Разрешаем сплит только если номиналы совпадают (например 8 и 8, или 10 и K) и если это первый сплит (len hands < 2 для защиты от бесконечности)
         if val1 == val2 and len(player.hands) < 4: 
              extra_row.append(InlineKeyboardButton(text="✂️ SPLIT", callback_data=f"split_{table.id}"))
         
@@ -636,9 +610,8 @@ async def finalize_game_db(table: GameTable):
         bal = data['balance']
         
         total_win_amount = 0
-        game_result_str = [] # Для логов: "Win, Loss"
+        game_result_str = [] 
         
-        # Считаем каждую руку отдельно
         for hand in p.hands:
             win_amount = 0
             res_str = ""
@@ -674,12 +647,8 @@ async def finalize_game_db(table: GameTable):
         if total_win_amount > 0: stats['max_win'] = max(stats['max_win'], total_win_amount)
             
         await update_player_stats(p.user_id, new_bal, stats)
-        
-        # Формируем строку карт для лога (объединяем все руки)
         all_hands_str = " | ".join([h.render() for h in p.hands])
         final_result_str = ", ".join(game_result_str)
-        
-        # ЛОГИРУЕМ ИГРУ С ЮЗЕРНЕЙМОМ
         await log_game(table.id, p.user_id, p_username, p.initial_bet, final_result_str, total_win_amount, all_hands_str, table.dealer_hand)
 
 # ====== ХЕНДЛЕРЫ ======
@@ -1159,19 +1128,12 @@ async def cb_hit(call: CallbackQuery):
     if hand.value > 21:
         hand.status = "bust"
         await call.answer("Перебор!", show_alert=False)
-        # Переходим к след. руке или игроку
-        if player.current_hand_index < len(player.hands) - 1:
-             player.current_hand_index += 1
-        else:
-             table.process_turns()
+        table.process_turns() # Авто-переключение
              
     elif hand.value == 21:
         hand.status = "stand"
         await call.answer("21! Стоп.", show_alert=False)
-        if player.current_hand_index < len(player.hands) - 1:
-             player.current_hand_index += 1
-        else:
-             table.process_turns()
+        table.process_turns() # Авто-переключение
         
     if table.state == "finished": await finalize_game_db(table)
     await update_table_messages(tid)
@@ -1191,15 +1153,9 @@ async def cb_stand(call: CallbackQuery):
     player.last_action = "stand" 
     await call.answer("Стоп.")
     
-    # Переходим к след. руке
-    if player.current_hand_index < len(player.hands) - 1:
-         player.current_hand_index += 1
-         # Обновляем сообщение (покажем след руку)
-         await update_table_messages(tid)
-    else:
-         table.process_turns()
-         if table.state == "finished": await finalize_game_db(table)
-         await update_table_messages(tid)
+    table.process_turns() # Авто-переключение
+    if table.state == "finished": await finalize_game_db(table)
+    await update_table_messages(tid)
 
 @dp.callback_query(lambda c: c.data.startswith("double_"))
 async def cb_double(call: CallbackQuery):
@@ -1226,13 +1182,9 @@ async def cb_double(call: CallbackQuery):
     
     await call.answer("Удвоение!")
     
-    if player.current_hand_index < len(player.hands) - 1:
-         player.current_hand_index += 1
-         await update_table_messages(tid)
-    else:
-         table.process_turns()
-         if table.state == "finished": await finalize_game_db(table)
-         await update_table_messages(tid)
+    table.process_turns() # Авто-переключение
+    if table.state == "finished": await finalize_game_db(table)
+    await update_table_messages(tid)
 
 # NEW: SPLIT HANDLER
 @dp.callback_query(lambda c: c.data.startswith("split_"))
