@@ -5,7 +5,7 @@ import asyncpg
 import uuid
 import time
 import json 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone, time as dt_time
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -1145,6 +1145,67 @@ async def process_table_chat(message: types.Message, state: FSMContext):
         await update_table_messages(target_table.id)
         # ЛОГИРУЕМ ЧАТ
         await log_chat(target_table.id, user_id, message.from_user.username, message.text)
+
+
+
+
+def main_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🃏 Играть Solo", callback_data="play_solo"),
+         InlineKeyboardButton(text="👥 Играть Multi", callback_data="play_multi")],
+        [InlineKeyboardButton(text="🎁 Получить фишки", callback_data="free_chips")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
+    ])
+
+
+
+@dp.callback_query(lambda c: c.data == "free_chips")
+async def cb_free_chips(call: CallbackQuery):
+    user_id = call.from_user.id
+    # 9:00 MSK = 6:00 UTC. We want the "day" to switch at 6:00 UTC.
+    # Current UTC time
+    now_utc = datetime.now(timezone.utc)
+    # To determine the "bonus day", we subtract 6 hours.
+    # If it's 5:59 UTC (8:59 MSK), subtracting 6h puts us in the previous day.
+    # If it's 6:01 UTC (9:01 MSK), subtracting 6h keeps us in the current day.
+    current_bonus_day = (now_utc - timedelta(hours=6)).date()
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT last_bonus_date FROM users WHERE userid = $1", user_id)
+
+        if not row or row['last_bonus_date'] != current_bonus_day:
+            bonus = 1000
+            await conn.execute("""
+                UPDATE users 
+                SET balance = balance + $1, last_bonus_date = $2 
+                WHERE userid = $3
+            """, bonus, current_bonus_day, user_id)
+
+            await call.answer(f"🎁 Вы получили {bonus} фишек!", show_alert=True)
+
+            # Update menu with new balance
+            data = await get_player_data(user_id)
+            name = f"@{data['username']}" if data['username'] else call.from_user.first_name
+            text = (f"🎰 **Blackjack Revolution**\n\n"
+                    f"👤 {name}\n"
+                    f"💰 Баланс: **{data['balance']}**\n"
+                    f"🎁 Ежедневный бонус получен!")
+            try:
+                await call.message.edit_text(text, parse_mode="Markdown", reply_markup=main_menu_kb())
+            except TelegramBadRequest:
+                pass
+        else:
+            # Calculate time until next 9:00 MSK (6:00 UTC)
+            # The next bonus is available on (current_bonus_day + 1 day) at 6:00 UTC
+            next_bonus_time = datetime.combine(current_bonus_day + timedelta(days=1), dt_time(6, 0), tzinfo=timezone.utc)
+            delta = next_bonus_time - now_utc
+
+            total_seconds = int(delta.total_seconds())
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+
+            await call.answer(f"⏳ Вы сегодня уже получили фишки\nДо следующего получения: {hours}ч {minutes}мин", show_alert=True)
+
 
 async def main():
     await init_db()
