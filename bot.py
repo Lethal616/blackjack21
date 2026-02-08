@@ -1121,52 +1121,59 @@ async def cb_stats(call: CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]])
     )
 
-# -- БЕСПЛАТНЫЕ ФИШКИ (FINAL FIX) --
+# -- БЕСПЛАТНЫЕ ФИШКИ (FINAL 2.0: POP-UP + FIX LOOP) --
 @dp.callback_query(lambda c: c.data == "free_chips")
 async def cb_free_chips(call: CallbackQuery):
     try:
         user_id = call.from_user.id
         now_utc = datetime.now(timezone.utc)
-        # Текущая дата бонуса (с учетом сдвига 9 утра МСК)
+        # Текущая дата по логике "смена дня в 9:00 МСК"
         current_bonus_date = (now_utc - timedelta(hours=6)).date()
         
         async with pool.acquire() as conn:
-            # 1. Проверка структуры БД
+            # 1. Получаем дату из базы
             try:
                 row = await conn.fetchrow("SELECT last_bonus_date FROM users WHERE user_id = $1", user_id)
             except Exception:
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_date DATE")
                 row = await conn.fetchrow("SELECT last_bonus_date FROM users WHERE user_id = $1", user_id)
 
-            last_date = row['last_bonus_date'] if row else None
-            
-            # 2. Сравнение
+            # --- ЖЕСТКАЯ ПРОВЕРКА ДАТЫ (FIX БЕСКОНЕЧНОСТИ) ---
+            last_date = None
+            if row and row['last_bonus_date']:
+                db_val = row['last_bonus_date']
+                # Если база вернула datetime (с часами), превращаем в date
+                if isinstance(db_val, datetime):
+                    last_date = db_val.date()
+                else:
+                    last_date = db_val # Это уже date
+
+            # 2. Сравниваем
             if last_date == current_bonus_date:
                 next_reset = datetime.combine(current_bonus_date + timedelta(days=1), dt_time(6, 0), tzinfo=timezone.utc)
                 delta = next_reset - now_utc
                 hours = int(delta.total_seconds() // 3600)
                 minutes = int((delta.total_seconds() % 3600) // 60)
-                await call.answer(f"⏳ Вы уже получили фишки!\nСброс через: {hours}ч {minutes}мин", show_alert=True)
+                
+                # Всплывающее окно вместо сообщения в чат
+                await call.answer(f"⏳ Вы уже получили бонус сегодня!\nПриходите через: {hours}ч {minutes}мин", show_alert=True)
                 return
 
-            # 3. Начисление (ВОТ ГЛАВНОЕ ИСПРАВЛЕНИЕ)
-            # Мы не используем $2 для даты, чтобы избежать путаницы типов. Мы вставляем дату текстом прямо в запрос.
-            # Это безопасно, так как мы сами генерируем строку даты, а не берем её от пользователя.
-            date_str = str(current_bonus_date) # Пример: "2026-02-08"
-            
+            # 3. Начисляем (если проверки пройдены)
+            date_str = str(current_bonus_date)
             await conn.execute(f"UPDATE users SET balance = balance + 1000, last_bonus_date = '{date_str}'::date WHERE user_id = $1", user_id)
             
             new_bal = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
 
-        # 4. Успех
-        await call.message.answer(f"🎁 *Ежедневный бонус!* \nВы получили *1000* фишек.\nВаш баланс: *{new_bal}* 🪙", parse_mode="Markdown")
-        await call.answer()
+        # 4. Успех - Всплывающее окно
+        await call.answer(f"🎁 ЕЖЕДНЕВНЫЙ БОНУС!\n\n+1000 фишек начислено.\nБаланс: {new_bal} 🪙", show_alert=True)
         
+        # Обновляем текст меню (чтобы цифра баланса изменилась визуально)
         try: await cb_menu(call)
         except: pass
 
     except Exception as e:
-        await call.message.answer(f"🆘 ОШИБКА: {e}")
+        await call.answer(f"🆘 Ошибка: {e}", show_alert=True)
 
 # ====== CHAT HANDLER ======
 @dp.message(F.text)
