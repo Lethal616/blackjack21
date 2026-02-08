@@ -290,33 +290,32 @@ class GameTable:
         self.play_dealer()
 
     def play_dealer(self):
-        val, is_soft = self._hand_value(self.dealer_hand)
-        # Дилер берет, если < 17 ИЛИ (17 и мягкая рука)
+        # Тут мы пишем return_soft=True, потому что нам ЭТО НУЖНО
+        val, is_soft = self._hand_value(self.dealer_hand, return_soft=True)
+        
         while val < 17 or (val == 17 and is_soft):
             c, s = self.deck.get_card()
             if s: self.shuffle_alert = True
             self.dealer_hand.append(c)
-            val, is_soft = self._hand_value(self.dealer_hand)
+            # И тут тоже просим явно
+            val, is_soft = self._hand_value(self.dealer_hand, return_soft=True)
+            
         self.state = "finished"
 
     # Строка 302 (примерно)
-    def _hand_value(self, hand):
-        # Строка 303 - ОБЯЗАТЕЛЬНО должен быть отступ (4 пробела)
+        def _hand_value(self, hand, return_soft=False):
         val = sum(10 if c[0] in "JQK" else 11 if c[0] == "A" else int(c[0]) for c in hand)
         aces = sum(1 for c in hand if c[0] == "A")
         
         while val > 21 and aces:
             val -= 10
             aces -= 1
-            
-        is_soft = (aces > 0)
-        return val, is_soft
         
-        while val > 21 and aces:
-            val -= 10
-            aces -= 1
+        # ХИТРОСТЬ: Если нас НЕ просили вернуть мягкость, возвращаем только число!
+        # Это спасет все старые куски кода, которые ждут число.
+        if not return_soft:
+            return val
             
-        # Если остались тузы, которые считаются за 11, значит рука мягкая
         is_soft = (aces > 0)
         return val, is_soft
 
@@ -541,7 +540,7 @@ async def update_table_messages(table_id):
             except TelegramBadRequest: pass
 
 async def finalize_game_db(table: GameTable):
-    d_val, _ = table._hand_value(table.dealer_hand)
+        d_val, _ = table._hand_value(table.dealer_hand)
     
     for p in table.players:
         data = await get_player_data(p.user_id) 
