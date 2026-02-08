@@ -1183,13 +1183,15 @@ async def process_table_chat(message: types.Message, state: FSMContext):
             target_table = table
             break
             
-    if target_table:
+        if target_table:
         target_table.add_chat_message(message.from_user.first_name, message.text)
         await update_table_messages(target_table.id)
         # ЛОГИРУЕМ ЧАТ
         await log_chat(target_table.id, user_id, message.from_user.username, message.text)
 
-        @dp.message(Command("fixdb"))
+# --- ВСТАВЛЯТЬ ОТСЮДА (Без отступов!) ---
+
+@dp.message(Command("fixdb"))
 async def cmd_manual_fix(message: types.Message):
     async with pool.acquire() as conn:
         try:
@@ -1206,3 +1208,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
