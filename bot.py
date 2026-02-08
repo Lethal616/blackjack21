@@ -1121,52 +1121,53 @@ async def cb_stats(call: CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]])
     )
 
-# -- БЕСПЛАТНЫЕ ФИШКИ (ULTIMATE FIX: STRING COMPARISON) --
+# -- БЕСПЛАТНЫЕ ФИШКИ (ВЕРСИЯ: РАБОТАЕМ С ТЕКСТОМ) --
 @dp.callback_query(lambda c: c.data == "free_chips")
 async def cb_free_chips(call: CallbackQuery):
     try:
         user_id = call.from_user.id
         now_utc = datetime.now(timezone.utc)
         
-        # 1. Вычисляем сегодняшнюю "бонусную дату" и сразу превращаем её в ТЕКСТ (например: "2026-02-08")
+        # 1. Формируем сегодняшнюю дату как простую строку "2026-02-08"
         current_bonus_date = (now_utc - timedelta(hours=6)).date()
-        target_date_str = current_bonus_date.strftime("%Y-%m-%d")
+        target_date_str = str(current_bonus_date)
         
         async with pool.acquire() as conn:
-            # 2. Проверяем наличие колонки (на всякий случай)
+            # 2. Получаем данные. Используем ::TEXT, чтобы база отдала нам строку в любом случае
             try:
-                # Специальный запрос: просим базу саму превратить дату в текст, чтобы не было ошибок типов
-                row = await conn.fetchrow("SELECT to_char(last_bonus_date, 'YYYY-MM-DD') as date_str FROM users WHERE user_id = $1", user_id)
+                row = await conn.fetchrow("SELECT last_bonus_date::TEXT FROM users WHERE user_id = $1", user_id)
             except Exception:
+                # Если колонки нет - создаем (по умолчанию создаем как DATE, но работать будет и с TEXT)
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_date DATE")
-                # Повторяем запрос после создания колонки
-                row = await conn.fetchrow("SELECT to_char(last_bonus_date, 'YYYY-MM-DD') as date_str FROM users WHERE user_id = $1", user_id)
+                row = await conn.fetchrow("SELECT last_bonus_date::TEXT FROM users WHERE user_id = $1", user_id)
 
-            # Получаем строку из базы (или None, если пусто)
-            db_date_str = row['date_str'] if row else None
+            # Получаем строку из базы. Если там None, будет None.
+            # Если там дата 2026-02-08, придет строка "2026-02-08"
+            db_date_str = row['last_bonus_date'] if row else None
+            
+            # Если строка длинная (например с временем "2026-02-08 12:00:00"), обрезаем до 10 символов
+            if db_date_str and len(str(db_date_str)) > 10:
+                db_date_str = str(db_date_str)[:10]
 
-            # 3. СРАВНИВАЕМ ДВЕ СТРОКИ (Самая надежная проверка)
-            if db_date_str == target_date_str:
-                # Считаем время до сброса
+            # 3. СРАВНИВАЕМ (Строка со строкой)
+            if str(db_date_str) == target_date_str:
                 next_reset = datetime.combine(current_bonus_date + timedelta(days=1), dt_time(6, 0), tzinfo=timezone.utc)
                 delta = next_reset - now_utc
                 hours = int(delta.total_seconds() // 3600)
                 minutes = int((delta.total_seconds() % 3600) // 60)
                 
-                # Показываем уведомление (Alert)
                 await call.answer(f"⏳ Вы уже получили бонус сегодня!\nПриходите через: {hours}ч {minutes}мин", show_alert=True)
                 return
 
-            # 4. Если даты разные — начисляем бонус
-            # Записываем дату тоже как строку, чтобы база точно поняла
+            # 4. НАЧИСЛЯЕМ
+            # Записываем дату. Используем safe-cast ::DATE, он работает и для текстовых колонок, и для дат.
             await conn.execute(f"UPDATE users SET balance = balance + 1000, last_bonus_date = '{target_date_str}'::date WHERE user_id = $1", user_id)
             
             new_bal = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
 
-        # 5. Успех (Alert)
+        # 5. УСПЕХ
         await call.answer(f"🎁 ЕЖЕДНЕВНЫЙ БОНУС!\n\n+1000 фишек начислено.\nБаланс: {new_bal} 🪙", show_alert=True)
         
-        # Обновляем цифры в меню
         try: await cb_menu(call)
         except: pass
 
