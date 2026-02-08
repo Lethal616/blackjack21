@@ -392,7 +392,7 @@ def get_lobby_kb(table: GameTable, user_id):
 
 async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bot):
     if table.state == "finished":
-        d_val, _ = table._hand_value(table.dealer_hand)
+        d_val, _ = table._hand_value(table.dealer_hand) # <--- ИСПРАВЛЕНИЕ (добавили , _)
         d_cards = " ".join(f"`{r}{s}`" for r,s in table.dealer_hand)
         dealer_section = (
             f"🤵 *DEALER*\n"
