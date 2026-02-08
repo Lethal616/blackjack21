@@ -1121,23 +1121,17 @@ async def cb_stats(call: CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]])
     )
 
-# -- БЕСПЛАТНЫЕ ФИШКИ (С ПРОВЕРКОЙ ОШИБОК) --
+# -- БЕСПЛАТНЫЕ ФИШКИ (FINAL FIX) --
 @dp.callback_query(lambda c: c.data == "free_chips")
 async def cb_free_chips(call: CallbackQuery):
     try:
-        # Проверяем, работают ли импорты времени
-        try:
-            test_time = datetime.now(timezone.utc)
-        except NameError:
-            await call.message.answer("❌ ОШИБКА КОДА: Вы забыли обновить строку 'from datetime ...' в самом верху файла! Добавьте туда timezone.")
-            return
-
         user_id = call.from_user.id
         now_utc = datetime.now(timezone.utc)
+        # Текущая дата бонуса (с учетом сдвига 9 утра МСК)
         current_bonus_date = (now_utc - timedelta(hours=6)).date()
         
         async with pool.acquire() as conn:
-            # 1. Проверяем/Создаем колонку
+            # 1. Проверка структуры БД
             try:
                 row = await conn.fetchrow("SELECT last_bonus_date FROM users WHERE user_id = $1", user_id)
             except Exception:
@@ -1146,7 +1140,7 @@ async def cb_free_chips(call: CallbackQuery):
 
             last_date = row['last_bonus_date'] if row else None
             
-            # 2. Проверяем дату
+            # 2. Сравнение
             if last_date == current_bonus_date:
                 next_reset = datetime.combine(current_bonus_date + timedelta(days=1), dt_time(6, 0), tzinfo=timezone.utc)
                 delta = next_reset - now_utc
@@ -1155,21 +1149,24 @@ async def cb_free_chips(call: CallbackQuery):
                 await call.answer(f"⏳ Вы уже получили фишки!\nСброс через: {hours}ч {minutes}мин", show_alert=True)
                 return
 
-            # 3. Начисляем
-            await conn.execute("UPDATE users SET balance = balance + 1000, last_bonus_date = $2 WHERE user_id = $1", user_id, current_bonus_date)
+            # 3. Начисление (ВОТ ГЛАВНОЕ ИСПРАВЛЕНИЕ)
+            # Мы не используем $2 для даты, чтобы избежать путаницы типов. Мы вставляем дату текстом прямо в запрос.
+            # Это безопасно, так как мы сами генерируем строку даты, а не берем её от пользователя.
+            date_str = str(current_bonus_date) # Пример: "2026-02-08"
+            
+            await conn.execute(f"UPDATE users SET balance = balance + 1000, last_bonus_date = '{date_str}'::date WHERE user_id = $1", user_id)
+            
             new_bal = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
 
         # 4. Успех
         await call.message.answer(f"🎁 *Ежедневный бонус!* \nВы получили *1000* фишек.\nВаш баланс: *{new_bal}* 🪙", parse_mode="Markdown")
         await call.answer()
         
-        # Обновляем меню
         try: await cb_menu(call)
         except: pass
 
     except Exception as e:
-        # ЭТА СТРОКА ПОКАЖЕТ ТЕБЕ ОШИБКУ В ЧАТЕ
-        await call.message.answer(f"🆘 КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        await call.message.answer(f"🆘 ОШИБКА: {e}")
 
 # ====== CHAT HANDLER ======
 @dp.message(F.text)
