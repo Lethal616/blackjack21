@@ -1066,18 +1066,29 @@ async def cb_hit(call: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("stand_"))
 async def cb_stand(call: CallbackQuery):
-    tid = call.data.split("_")[1]
-    table = tables.get(tid)
-    if not table: return
-    player = table.get_player(call.from_user.id)
-    if not player or table.players[table.current_player_index] != player: return await call.answer("Не твой ход!")
+    try:
+        tid = call.data.split("_")[1]
+        table = tables.get(tid)
+        if not table: return
+
+        player = table.get_player(call.from_user.id)
+        if not player or table.players[table.current_player_index] != player: 
+            return await call.answer("Не твой ход!")
+
+        player.status = "stand"
+        player.last_action = "stand"
+        await call.answer("Стоп.")
+
+        # ВОТ ЗДЕСЬ МОЖЕТ БЫТЬ ОШИБКА
+        table.process_turns()
+
+        if table.state == "finished": 
+            await finalize_game_db(table)
         
-    player.status = "stand"
-    player.last_action = "stand" 
-    await call.answer("Стоп.")
-    table.process_turns()
-    if table.state == "finished": await finalize_game_db(table)
-    await update_table_messages(tid)
+        await update_table_messages(tid)
+    except Exception as e:
+        # ЭТО ПОКАЖЕТ НАМ ПРИЧИНУ ЗАВИСАНИЯ
+        await call.message.answer(f"🆘 ОШИБКА STAND: {e}")
 
 @dp.callback_query(lambda c: c.data.startswith("double_"))
 async def cb_double(call: CallbackQuery):
