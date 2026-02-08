@@ -1121,54 +1121,52 @@ async def cb_stats(call: CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]])
     )
 
-# -- БЕСПЛАТНЫЕ ФИШКИ (FINAL 2.0: POP-UP + FIX LOOP) --
+# -- БЕСПЛАТНЫЕ ФИШКИ (ULTIMATE FIX: STRING COMPARISON) --
 @dp.callback_query(lambda c: c.data == "free_chips")
 async def cb_free_chips(call: CallbackQuery):
     try:
         user_id = call.from_user.id
         now_utc = datetime.now(timezone.utc)
-        # Текущая дата по логике "смена дня в 9:00 МСК"
+        
+        # 1. Вычисляем сегодняшнюю "бонусную дату" и сразу превращаем её в ТЕКСТ (например: "2026-02-08")
         current_bonus_date = (now_utc - timedelta(hours=6)).date()
+        target_date_str = current_bonus_date.strftime("%Y-%m-%d")
         
         async with pool.acquire() as conn:
-            # 1. Получаем дату из базы
+            # 2. Проверяем наличие колонки (на всякий случай)
             try:
-                row = await conn.fetchrow("SELECT last_bonus_date FROM users WHERE user_id = $1", user_id)
+                # Специальный запрос: просим базу саму превратить дату в текст, чтобы не было ошибок типов
+                row = await conn.fetchrow("SELECT to_char(last_bonus_date, 'YYYY-MM-DD') as date_str FROM users WHERE user_id = $1", user_id)
             except Exception:
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_date DATE")
-                row = await conn.fetchrow("SELECT last_bonus_date FROM users WHERE user_id = $1", user_id)
+                # Повторяем запрос после создания колонки
+                row = await conn.fetchrow("SELECT to_char(last_bonus_date, 'YYYY-MM-DD') as date_str FROM users WHERE user_id = $1", user_id)
 
-            # --- ЖЕСТКАЯ ПРОВЕРКА ДАТЫ (FIX БЕСКОНЕЧНОСТИ) ---
-            last_date = None
-            if row and row['last_bonus_date']:
-                db_val = row['last_bonus_date']
-                # Если база вернула datetime (с часами), превращаем в date
-                if isinstance(db_val, datetime):
-                    last_date = db_val.date()
-                else:
-                    last_date = db_val # Это уже date
+            # Получаем строку из базы (или None, если пусто)
+            db_date_str = row['date_str'] if row else None
 
-            # 2. Сравниваем
-            if last_date == current_bonus_date:
+            # 3. СРАВНИВАЕМ ДВЕ СТРОКИ (Самая надежная проверка)
+            if db_date_str == target_date_str:
+                # Считаем время до сброса
                 next_reset = datetime.combine(current_bonus_date + timedelta(days=1), dt_time(6, 0), tzinfo=timezone.utc)
                 delta = next_reset - now_utc
                 hours = int(delta.total_seconds() // 3600)
                 minutes = int((delta.total_seconds() % 3600) // 60)
                 
-                # Всплывающее окно вместо сообщения в чат
+                # Показываем уведомление (Alert)
                 await call.answer(f"⏳ Вы уже получили бонус сегодня!\nПриходите через: {hours}ч {minutes}мин", show_alert=True)
                 return
 
-            # 3. Начисляем (если проверки пройдены)
-            date_str = str(current_bonus_date)
-            await conn.execute(f"UPDATE users SET balance = balance + 1000, last_bonus_date = '{date_str}'::date WHERE user_id = $1", user_id)
+            # 4. Если даты разные — начисляем бонус
+            # Записываем дату тоже как строку, чтобы база точно поняла
+            await conn.execute(f"UPDATE users SET balance = balance + 1000, last_bonus_date = '{target_date_str}'::date WHERE user_id = $1", user_id)
             
             new_bal = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
 
-        # 4. Успех - Всплывающее окно
+        # 5. Успех (Alert)
         await call.answer(f"🎁 ЕЖЕДНЕВНЫЙ БОНУС!\n\n+1000 фишек начислено.\nБаланс: {new_bal} 🪙", show_alert=True)
         
-        # Обновляем текст меню (чтобы цифра баланса изменилась визуально)
+        # Обновляем цифры в меню
         try: await cb_menu(call)
         except: pass
 
