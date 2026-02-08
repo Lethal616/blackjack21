@@ -303,7 +303,7 @@ class GameTable:
         self.state = "finished"
 
     # Строка 302 (примерно)
-        def _hand_value(self, hand, return_soft=False):
+    def _hand_value(self, hand, return_soft=False):
         val = sum(10 if c[0] in "JQK" else 11 if c[0] == "A" else int(c[0]) for c in hand)
         aces = sum(1 for c in hand if c[0] == "A")
         
