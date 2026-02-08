@@ -1206,6 +1206,16 @@ async def cb_free_chips(call: CallbackQuery):
 
             await call.answer(f"⏳ Вы сегодня уже получили фишки\nДо следующего получения: {hours}ч {minutes}мин", show_alert=True)
 
+            @dp.message(Command("fixdb"))
+async def cmd_fixdb(message: types.Message):
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_date DATE")
+            await message.answer("✅ База данных обновлена: колонка last_bonus_date добавлена.")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+
+
 
 async def main():
     await init_db()
