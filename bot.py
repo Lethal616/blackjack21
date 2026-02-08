@@ -289,7 +289,7 @@ class GameTable:
         self.state = "dealer_turn"
         self.play_dealer()
 
-       def play_dealer(self):
+    def play_dealer(self):
         val, is_soft = self._hand_value(self.dealer_hand)
         # Дилер берет, если < 17 ИЛИ (17 и мягкая рука)
         while val < 17 or (val == 17 and is_soft):
