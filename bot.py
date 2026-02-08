@@ -1109,7 +1109,6 @@ async def cb_stats(call: CallbackQuery):
         f"🃏 Blackjack: *{s['blackjacks']}*\n"
         f"📈 Win Rate: *{win_rate}%*\n\n"
         f"🪙 Баланс: *{data['balance']}*\n"
-        f"💵 Профит: *{net_str}*\n"
         f"🏦 Макс. баланс: *{s['max_balance']}*\n"
         f"🤑 Макс. выигрыш: *{s['max_win']}*\n\n"
         f"🆔 ID: `{call.from_user.id}`"
