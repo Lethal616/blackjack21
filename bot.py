@@ -5,7 +5,7 @@ import asyncpg
 import uuid
 import time
 import json 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone, time as dt_time
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -601,7 +601,8 @@ def main_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 Одиночная игра", callback_data="play_solo")],
         [InlineKeyboardButton(text="👥 Онлайн столы", callback_data="play_multi")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="🎁 Бесплатные фишки", callback_data="free_chips")]
     ])
 
 @dp.callback_query(lambda c: c.data == "menu")
@@ -1119,6 +1120,48 @@ async def cb_stats(call: CallbackQuery):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]])
     )
+
+    # -- БЕСПЛАТНЫЕ ФИШКИ --
+@dp.callback_query(lambda c: c.data == "free_chips")
+async def cb_free_chips(call: CallbackQuery):
+    user_id = call.from_user.id
+    # 9:00 МСК = 6:00 UTC. Сдвигаем время назад на 6 часов, чтобы получить "текущий бонусный день"
+    now_utc = datetime.now(timezone.utc)
+    current_bonus_date = (now_utc - timedelta(hours=6)).date()
+    
+    async with pool.acquire() as conn:
+        # Авто-создание колонки в базе, если её нет (чтобы не было ошибок)
+        try:
+            row = await conn.fetchrow("SELECT last_bonus_date FROM users WHERE user_id = $1", user_id)
+        except Exception:
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_date DATE")
+            row = await conn.fetchrow("SELECT last_bonus_date FROM users WHERE user_id = $1", user_id)
+
+        last_date = row['last_bonus_date'] if row else None
+        
+        # Если дата совпадает — бонус уже получен в этом "суточном цикле" (после 9:00 МСК)
+        if last_date == current_bonus_date:
+            # Считаем время до следующего сброса (завтра в 06:00 UTC)
+            next_reset = datetime.combine(current_bonus_date + timedelta(days=1), dt_time(6, 0), tzinfo=timezone.utc)
+            delta = next_reset - now_utc
+            
+            hours = int(delta.total_seconds() // 3600)
+            minutes = int((delta.total_seconds() % 3600) // 60)
+            
+            await call.answer(f"⏳ Вы уже получили фишки сегодня!\nСброс через: {hours}ч {minutes}мин", show_alert=True)
+            return
+
+        # Выдаем бонус
+        await conn.execute("UPDATE users SET balance = balance + 1000, last_bonus_date = $2 WHERE user_id = $1", user_id, current_bonus_date)
+        
+        # Получаем новый баланс для красивого сообщения
+        new_bal = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
+
+    await call.message.answer(f"🎁 *Ежедневный бонус!* \nВы получили *1000* фишек.\nВаш баланс: *{new_bal}* 🪙", parse_mode="Markdown")
+    await call.answer()
+    # Обновляем меню, чтобы баланс визуально обновился
+    try: await cb_menu(call)
+    except: pass
 
 # ====== CHAT HANDLER ======
 @dp.message(F.text)
