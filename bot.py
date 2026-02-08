@@ -1215,8 +1215,6 @@ async def cmd_fixdb(message: types.Message):
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}")
 
-
-
 async def main():
     await init_db()
     print("Bot started")
