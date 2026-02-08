@@ -540,10 +540,11 @@ async def update_table_messages(table_id):
             except TelegramBadRequest: pass
 
 async def finalize_game_db(table: GameTable):
-        d_val, _ = table._hand_value(table.dealer_hand)
+    # Используем наш новый умный метод (он вернет просто число, так как мы не просим soft)
+    d_val = table._hand_value(table.dealer_hand)
     
     for p in table.players:
-        data = await get_player_data(p.user_id) 
+        data = await get_player_data(p.user_id)
         p_username = data.get('username', 'Unknown')
         stats = data['stats']
         bal = data['balance']
@@ -556,10 +557,10 @@ async def finalize_game_db(table: GameTable):
             stats['losses'] += 1
             result_type = "loss"
         elif p.status == "blackjack":
-             win_amount = int(p.bet * 1.5)
-             stats['wins'] += 1
-             stats['blackjacks'] += 1
-             result_type = "blackjack"
+            win_amount = int(p.bet * 1.5)
+            stats['wins'] += 1
+            stats['blackjacks'] += 1
+            result_type = "blackjack"
         elif d_val > 21 or p.value > d_val:
             win_amount = p.bet
             stats['wins'] += 1
@@ -572,13 +573,14 @@ async def finalize_game_db(table: GameTable):
             win_amount = 0
             stats['pushes'] += 1
             result_type = "push"
-
+            
         new_bal = bal + win_amount
         stats['games'] += 1
         stats['max_balance'] = max(stats['max_balance'], new_bal)
         if win_amount > 0: stats['max_win'] = max(stats['max_win'], win_amount)
-            
+        
         await update_player_stats(p.user_id, new_bal, stats)
+        
         # ЛОГИРУЕМ ИГРУ С ЮЗЕРНЕЙМОМ
         await log_game(table.id, p.user_id, p_username, p.bet, result_type, win_amount, p.hand, table.dealer_hand)
 
