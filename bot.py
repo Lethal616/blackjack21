@@ -1189,6 +1189,15 @@ async def process_table_chat(message: types.Message, state: FSMContext):
         # ЛОГИРУЕМ ЧАТ
         await log_chat(target_table.id, user_id, message.from_user.username, message.text)
 
+        @dp.message(Command("fixdb"))
+async def cmd_manual_fix(message: types.Message):
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_date DATE")
+            await message.answer("✅ База данных успешно обновлена! Пробуй брать фишки.")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+
 async def main():
     await init_db()
     print("Bot started")
