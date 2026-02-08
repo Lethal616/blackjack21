@@ -290,34 +290,21 @@ class GameTable:
         self.play_dealer()
 
     def play_dealer(self):
-        # Тут мы пишем return_soft=True, потому что нам ЭТО НУЖНО
-        val, is_soft = self._hand_value(self.dealer_hand, return_soft=True)
-        
-        while val < 17 or (val == 17 and is_soft):
+        val = self._hand_value(self.dealer_hand)
+        while val < 17:
             c, s = self.deck.get_card()
             if s: self.shuffle_alert = True
             self.dealer_hand.append(c)
-            # И тут тоже просим явно
-            val, is_soft = self._hand_value(self.dealer_hand, return_soft=True)
-            
+            val = self._hand_value(self.dealer_hand)
         self.state = "finished"
 
-    # Строка 302 (примерно)
-    def _hand_value(self, hand, return_soft=False):
+    def _hand_value(self, hand):
         val = sum(10 if c[0] in "JQK" else 11 if c[0] == "A" else int(c[0]) for c in hand)
         aces = sum(1 for c in hand if c[0] == "A")
-        
         while val > 21 and aces:
             val -= 10
             aces -= 1
-        
-        # ХИТРОСТЬ: Если нас НЕ просили вернуть мягкость, возвращаем только число!
-        # Это спасет все старые куски кода, которые ждут число.
-        if not return_soft:
-            return val
-            
-        is_soft = (aces > 0)
-        return val, is_soft
+        return val
 
 tables = {} 
 
@@ -391,7 +378,7 @@ def get_lobby_kb(table: GameTable, user_id):
 
 async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bot):
     if table.state == "finished":
-        d_val, _ = table._hand_value(table.dealer_hand) # <--- ИСПРАВЛЕНИЕ (добавили , _)
+        d_val = table._hand_value(table.dealer_hand)
         d_cards = " ".join(f"`{r}{s}`" for r,s in table.dealer_hand)
         dealer_section = (
             f"🤵 *DEALER*\n"
@@ -399,7 +386,7 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         )
     else:
         visible = table.dealer_hand[0]
-        vis_val, _ = table._hand_value([visible])
+        vis_val = table._hand_value([visible])
         d_cards = f"`{visible[0]}{visible[1]}` `??`"
         dealer_section = (
             f"🤵 *DEALER*\n"
@@ -540,11 +527,10 @@ async def update_table_messages(table_id):
             except TelegramBadRequest: pass
 
 async def finalize_game_db(table: GameTable):
-    # Используем наш новый умный метод (он вернет просто число, так как мы не просим soft)
     d_val = table._hand_value(table.dealer_hand)
     
     for p in table.players:
-        data = await get_player_data(p.user_id)
+        data = await get_player_data(p.user_id) 
         p_username = data.get('username', 'Unknown')
         stats = data['stats']
         bal = data['balance']
@@ -557,10 +543,10 @@ async def finalize_game_db(table: GameTable):
             stats['losses'] += 1
             result_type = "loss"
         elif p.status == "blackjack":
-            win_amount = int(p.bet * 1.5)
-            stats['wins'] += 1
-            stats['blackjacks'] += 1
-            result_type = "blackjack"
+             win_amount = int(p.bet * 1.5)
+             stats['wins'] += 1
+             stats['blackjacks'] += 1
+             result_type = "blackjack"
         elif d_val > 21 or p.value > d_val:
             win_amount = p.bet
             stats['wins'] += 1
@@ -573,14 +559,13 @@ async def finalize_game_db(table: GameTable):
             win_amount = 0
             stats['pushes'] += 1
             result_type = "push"
-            
+
         new_bal = bal + win_amount
         stats['games'] += 1
         stats['max_balance'] = max(stats['max_balance'], new_bal)
         if win_amount > 0: stats['max_win'] = max(stats['max_win'], win_amount)
-        
+            
         await update_player_stats(p.user_id, new_bal, stats)
-        
         # ЛОГИРУЕМ ИГРУ С ЮЗЕРНЕЙМОМ
         await log_game(table.id, p.user_id, p_username, p.bet, result_type, win_amount, p.hand, table.dealer_hand)
 
@@ -1067,29 +1052,18 @@ async def cb_hit(call: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("stand_"))
 async def cb_stand(call: CallbackQuery):
-    try:
-        tid = call.data.split("_")[1]
-        table = tables.get(tid)
-        if not table: return
-
-        player = table.get_player(call.from_user.id)
-        if not player or table.players[table.current_player_index] != player: 
-            return await call.answer("Не твой ход!")
-
-        player.status = "stand"
-        player.last_action = "stand"
-        await call.answer("Стоп.")
-
-        # ВОТ ЗДЕСЬ МОЖЕТ БЫТЬ ОШИБКА
-        table.process_turns()
-
-        if table.state == "finished": 
-            await finalize_game_db(table)
+    tid = call.data.split("_")[1]
+    table = tables.get(tid)
+    if not table: return
+    player = table.get_player(call.from_user.id)
+    if not player or table.players[table.current_player_index] != player: return await call.answer("Не твой ход!")
         
-        await update_table_messages(tid)
-    except Exception as e:
-        # ЭТО ПОКАЖЕТ НАМ ПРИЧИНУ ЗАВИСАНИЯ
-        await call.message.answer(f"🆘 ОШИБКА STAND: {e}")
+    player.status = "stand"
+    player.last_action = "stand" 
+    await call.answer("Стоп.")
+    table.process_turns()
+    if table.state == "finished": await finalize_game_db(table)
+    await update_table_messages(tid)
 
 @dp.callback_query(lambda c: c.data.startswith("double_"))
 async def cb_double(call: CallbackQuery):
