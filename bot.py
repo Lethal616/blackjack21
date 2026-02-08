@@ -1183,7 +1183,9 @@ async def process_table_chat(message: types.Message, state: FSMContext):
             target_table = table
             break
             
-        if target_table:
+    # <-- ОБРАТИ ВНИМАНИЕ: этот if должен быть не внутри цикла for, а после него
+    if target_table:
+        # <-- ВОТ ЗДЕСЬ БЫЛА ОШИБКА. Добавлен отступ (4 пробела)
         target_table.add_chat_message(message.from_user.first_name, message.text)
         await update_table_messages(target_table.id)
         # ЛОГИРУЕМ ЧАТ
