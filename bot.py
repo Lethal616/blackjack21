@@ -1194,19 +1194,20 @@ async def cb_free_chips(call: CallbackQuery):
                 await call.message.edit_text(text, parse_mode="Markdown", reply_markup=main_menu_kb())
             except TelegramBadRequest:
                 pass
-        else:
+                else:
             # Calculate time until next 9:00 MSK (6:00 UTC)
             # The next bonus is available on (current_bonus_day + 1 day) at 6:00 UTC
             next_bonus_time = datetime.combine(current_bonus_day + timedelta(days=1), dt_time(6, 0), tzinfo=timezone.utc)
             delta = next_bonus_time - now_utc
-
+            
             total_seconds = int(delta.total_seconds())
             hours = total_seconds // 3600
             minutes = (total_seconds % 3600) // 60
-
+            
             await call.answer(f"⏳ Вы сегодня уже получили фишки\nДо следующего получения: {hours}ч {minutes}мин", show_alert=True)
 
-            @dp.message(Command("fixdb"))
+# Обрати внимание: этот код теперь с краю (без отступов), это ОТДЕЛЬНАЯ функция
+@dp.message(Command("fixdb"))
 async def cmd_fixdb(message: types.Message):
     async with pool.acquire() as conn:
         try:
