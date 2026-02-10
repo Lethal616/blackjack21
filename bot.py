@@ -591,8 +591,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username
     
-    # Получаем аргументы запуска (то, что после ?start=...)
-    # Например: если ссылка t.me/bot?start=123, то args будет "123"
     args = message.text.split()
     referrer_candidate = None
     if len(args) > 1:
@@ -602,7 +600,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
             pass
 
     async with pool.acquire() as conn:
-        # 1. Регистрируем пользователя (если его нет)
+        # 1. Регистрируем или получаем пользователя
         row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
         is_new_player = False
         
@@ -615,22 +613,17 @@ async def cmd_start(message: types.Message, state: FSMContext):
             is_new_player = True
             row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
         
-        # Обновляем юзернейм если сменился
+        # Обновляем юзернейм
         if username and row['username'] != username:
             await conn.execute("UPDATE users SET username = $2 WHERE user_id = $1", user_id, username)
 
-        # 2. ЛОГИКА РЕФЕРАЛКИ
-        # Проверяем: это новый игрок? Есть ли кандидат пригласителя? Не пригласил ли он сам себя?
+        # 2. ЛОГИКА РЕФЕРАЛКИ (Только если игрок новый)
         if is_new_player and referrer_candidate and referrer_candidate != user_id:
-            # Проверяем, существует ли пригласитель в базе
             ref_row = await conn.fetchrow("SELECT user_id FROM users WHERE user_id = $1", referrer_candidate)
             
             if ref_row:
-                # ЗАПИСЫВАЕМ СВЯЗЬ и НАЧИСЛЯЕМ БОНУСЫ
-                # 1. Новичку +3000 (и записываем кто привел)
+                # Начисляем бонусы
                 await conn.execute("UPDATE users SET balance = balance + 3000, referrer_id = $2 WHERE user_id = $1", user_id, referrer_candidate)
-                
-                # 2. Пригласителю +5000
                 await conn.execute("UPDATE users SET balance = balance + 5000 WHERE user_id = $1", referrer_candidate)
                 
                 # Уведомляем пригласителя
@@ -643,10 +636,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
                     , parse_mode="Markdown")
                 except: pass
                 
-                # Уведомляем новичка
+                # Уведомляем новичка (отдельным сообщением перед меню)
                 await message.answer("🤝 *Вы пришли по приглашению!*\nВам начислен стартовый бонус: *+3000* фишек! 💰", parse_mode="Markdown")
 
-        # Получаем актуальные данные для отображения меню
+        # 3. ПОЛУЧАЕМ ДАННЫЕ И ОТПРАВЛЯЕМ МЕНЮ (ВСЕГДА!)
+        # Важно заново запросить данные из базы, так как баланс мог измениться после бонуса
         data = await get_player_data(user_id, username)
         s = data['stats']
         name = f"@{data['username']}" if data['username'] else message.from_user.first_name
