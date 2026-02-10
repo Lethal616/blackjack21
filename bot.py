@@ -1185,17 +1185,23 @@ async def cb_double(call: CallbackQuery):
     if table.state == "finished": await finalize_game_db(table)
     await update_table_messages(tid)
 
+# -- СТАТИСТИКА (С РЕФЕРАЛАМИ) --
 @dp.callback_query(lambda c: c.data == "stats")
 async def cb_stats(call: CallbackQuery):
     data = await get_player_data(call.from_user.id)
     s = data['stats']
     
+    # Считаем количество рефералов
+    refs_count = 0
+    async with pool.acquire() as conn:
+        refs_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE referrer_id = $1", call.from_user.id)
+
     total_games = s['games']
     win_rate = round((s['wins'] / total_games * 100), 1) if total_games > 0 else 0
     
     net_profit = data['balance'] - 1000
     net_str = f"+{net_profit}" if net_profit > 0 else f"{net_profit}"
-
+    
     stats_text = (
         f"📊 *Личная статистика*\n\n"
         f"🎮 Игры: *{s['games']}*\n"
@@ -1204,15 +1210,20 @@ async def cb_stats(call: CallbackQuery):
         f"🤝 Ничьи: *{s['pushes']}*\n"
         f"🃏 Blackjack: *{s['blackjacks']}*\n"
         f"📈 Win Rate: *{win_rate}%*\n\n"
+        
+        f"👥 *Приглашено друзей:* *{refs_count}*\n\n"  # <-- НОВАЯ СТРОКА
+        
         f"🪙 Баланс: *{data['balance']}*\n"
+        f"💵 Профит: *{net_str}*\n"
         f"🏦 Макс. баланс: *{s['max_balance']}*\n"
         f"🤑 Макс. выигрыш: *{s['max_win']}*\n\n"
+        
         f"🆔 ID: `{call.from_user.id}`"
     )
     
     await call.message.edit_text(
-        stats_text,
-        parse_mode="Markdown",
+        stats_text, 
+        parse_mode="Markdown", 
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]])
     )
 
