@@ -59,6 +59,12 @@ async def init_db():
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
         except: pass
 
+        # --- НОВОЕ: ДОБАВЛЯЕМ КОЛОНКУ ДЛЯ РЕФЕРАЛОВ ---
+        try:
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id BIGINT")
+        except: pass
+        # ----------------------------------------------
+
         # Таблица логов игр
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS game_logs (
@@ -90,19 +96,21 @@ async def init_db():
             )
         """)
 
-    print("Database initialized with logs and usernames")
+    print("Database initialized with logs, usernames and referrals")
 
 async def get_player_data(user_id, username=None):
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
         
         if not row:
+            # Создаем нового пользователя
             await conn.execute(
                 "INSERT INTO users (user_id, username, balance, max_balance, max_win) VALUES ($1, $2, $3, $3, 0) ON CONFLICT (user_id) DO NOTHING",
                 user_id, username, 1000
             )
             return {"balance": 1000, "username": username, "stats": {"games":0, "wins":0, "losses":0, "pushes":0, "blackjacks":0, "max_balance":1000, "max_win":0}}
         
+        # Обновляем юзернейм, если он сменился
         if username and row['username'] != username:
              await conn.execute("UPDATE users SET username = $2 WHERE user_id = $1", user_id, username)
         
@@ -580,9 +588,68 @@ class MultiCustomBet(StatesGroup):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    data = await get_player_data(message.from_user.id, message.from_user.username)
-    s = data['stats']
-    name = f"@{data['username']}" if data['username'] else message.from_user.first_name
+    user_id = message.from_user.id
+    username = message.from_user.username
+    
+    # Получаем аргументы запуска (то, что после ?start=...)
+    # Например: если ссылка t.me/bot?start=123, то args будет "123"
+    args = message.text.split()
+    referrer_candidate = None
+    if len(args) > 1:
+        try:
+            referrer_candidate = int(args[1])
+        except ValueError:
+            pass
+
+    async with pool.acquire() as conn:
+        # 1. Регистрируем пользователя (если его нет)
+        row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+        is_new_player = False
+        
+        if not row:
+            # Создаем нового
+            await conn.execute(
+                "INSERT INTO users (user_id, username, balance, max_balance, max_win) VALUES ($1, $2, 1000, 1000, 0)",
+                user_id, username
+            )
+            is_new_player = True
+            row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+        
+        # Обновляем юзернейм если сменился
+        if username and row['username'] != username:
+            await conn.execute("UPDATE users SET username = $2 WHERE user_id = $1", user_id, username)
+
+        # 2. ЛОГИКА РЕФЕРАЛКИ
+        # Проверяем: это новый игрок? Есть ли кандидат пригласителя? Не пригласил ли он сам себя?
+        if is_new_player and referrer_candidate and referrer_candidate != user_id:
+            # Проверяем, существует ли пригласитель в базе
+            ref_row = await conn.fetchrow("SELECT user_id FROM users WHERE user_id = $1", referrer_candidate)
+            
+            if ref_row:
+                # ЗАПИСЫВАЕМ СВЯЗЬ и НАЧИСЛЯЕМ БОНУСЫ
+                # 1. Новичку +3000 (и записываем кто привел)
+                await conn.execute("UPDATE users SET balance = balance + 3000, referrer_id = $2 WHERE user_id = $1", user_id, referrer_candidate)
+                
+                # 2. Пригласителю +5000
+                await conn.execute("UPDATE users SET balance = balance + 5000 WHERE user_id = $1", referrer_candidate)
+                
+                # Уведомляем пригласителя
+                try:
+                    await bot.send_message(
+                        referrer_candidate, 
+                        f"🎉 *Новый реферал!*\n"
+                        f"По вашей ссылке пришел игрок {message.from_user.first_name}.\n"
+                        f"Вам начислено: *+5000* 🪙"
+                    , parse_mode="Markdown")
+                except: pass
+                
+                # Уведомляем новичка
+                await message.answer("🤝 *Вы пришли по приглашению!*\nВам начислен стартовый бонус: *+3000* фишек! 💰", parse_mode="Markdown")
+
+        # Получаем актуальные данные для отображения меню
+        data = await get_player_data(user_id, username)
+        s = data['stats']
+        name = f"@{data['username']}" if data['username'] else message.from_user.first_name
 
     text = (
         f"🎩 *Blackjack Revolution*\n"
@@ -594,7 +661,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         f"━━━━━━━━━━━━━━━\n\n"
         f"🎲 _Столы открыты. Делайте ваши ставки._"
     )
-    
+
     await message.answer(text, parse_mode="Markdown", reply_markup=main_menu_kb())
 
 def main_menu_kb():
@@ -602,7 +669,9 @@ def main_menu_kb():
         [InlineKeyboardButton(text="👤 Одиночная игра", callback_data="play_solo")],
         [InlineKeyboardButton(text="👥 Онлайн столы", callback_data="play_multi")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="🎁 Бесплатные фишки", callback_data="free_chips")]
+        [InlineKeyboardButton(text="🎁 Бесплатные фишки", callback_data="free_chips")],
+        # Обрати внимание: я поменял порядок кнопок, чтобы было красивее (бесплатное рядом)
+        [InlineKeyboardButton(text="🤝 Реферальная программа", callback_data="ref_system")]
     ])
 
 @dp.callback_query(lambda c: c.data == "menu")
@@ -621,7 +690,40 @@ async def cb_menu(call: CallbackQuery):
         f"━━━━━━━━━━━━━━━\n\n"
         f"🎲 _Столы открыты. Делайте ваши ставки._"
     )
-    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=main_menu_kb())
+    # Используем edit_text, чтобы не спамить новыми сообщениями при нажатии "Назад"
+    try:
+        await call.message.edit_text(text, parse_mode="Markdown", reply_markup=main_menu_kb())
+    except TelegramBadRequest:
+        # Если текст не изменился (например, юзер дважды нажал), просто игнорируем ошибку
+        pass
+
+# --- ОБРАБОТЧИК КНОПКИ РЕФЕРАЛКИ (ЕГО НЕ БЫЛО) ---
+@dp.callback_query(lambda c: c.data == "ref_system")
+async def cb_ref_system(call: CallbackQuery):
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
+    ref_link = f"https://t.me/{bot_username}?start={call.from_user.id}"
+    
+    text = (
+        "🤝 *ПАРТНЕРСКАЯ ПРОГРАММА*\n\n"
+        "Приглашай друзей и зарабатывай фишки!\n\n"
+        "👤 *Ты получишь:* 5,000 🪙 за каждого друга.\n"
+        "🎁 *Друг получит:* 3,000 🪙 бонуса на старт.\n\n"
+        "🔗 *Твоя ссылка для приглашения:*\n"
+        f"`{ref_link}`\n\n"
+        "_Нажми на ссылку, чтобы скопировать, и отправь другу!_"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 В меню", callback_data="menu")]
+    ])
+    
+    try:
+        await call.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    except:
+        await call.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+    await call.answer()
+# -------------------------------------------------
 
 # -- СОЛО --
 @dp.callback_query(lambda c: c.data == "play_solo")
