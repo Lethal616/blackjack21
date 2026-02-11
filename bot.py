@@ -623,9 +623,15 @@ async def cmd_admin_add(message: types.Message):
             try:
                 msg_text = ""
                 if amount > 0:
-                    msg_text = f"🎁 *Администратор начислил вам {amount} фишек!*"
+                    msg_text = (
+                        f"🎁 *Администратор начислил вам {amount} фишек!*\n"
+                        f"💼 Ваш новый баланс: *{new_bal}* 🪙"
+                    )
                 else:
-                    msg_text = f"📉 *Администратор списал у вас {abs(amount)} фишек.*"
+                    msg_text = (
+                        f"📉 *Администратор списал у вас {abs(amount)} фишек.*\n"
+                        f"💼 Ваш новый баланс: *{new_bal}* 🪙"
+                    )
                 
                 await bot.send_message(target_id, msg_text, parse_mode="Markdown")
             except:
