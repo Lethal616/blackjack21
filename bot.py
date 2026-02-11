@@ -462,7 +462,7 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         d_val = table._hand_value(table.dealer_hand)
         d_cards = " ".join(f"`{r}{s}`" for r,s in table.dealer_hand)
         dealer_section = (
-            f"🤵 *DEALER*\n"
+            f"🤵 DEALER\n"
             f"{d_cards} ➡️ *{d_val}*\n"
         )
     else:
@@ -470,11 +470,11 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
         vis_val = table._hand_value([visible])
         d_cards = f"`{visible[0]}{visible[1]}` `??`"
         dealer_section = (
-            f"🤵 *DEALER*\n"
+            f"🤵 DEALER\n"
             f"{d_cards} ➡️ *{vis_val}*\n"
         )
 
-    players_section = ""
+    players_section_lines = []
     for p in table.players:
         is_me = " (Вы)" if p.user_id == player.user_id else ""
         # Для каждого игрока можем иметь несколько рук (после сплита)
@@ -536,12 +536,24 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
                     status_text = "   _❌ ПРОИГРЫШ_"
 
             hand_label = f" (Рука {idx+1})" if len(p.hands) > 1 else ""
-            name_line = f"{status_marker} *{p.name}*{is_me}{hand_label}{action_trail} • {bet}💰"
+            name_line = f"{status_marker} *{p.name}*{is_me}{hand_label} • {bet}🪙"
             cards_str = " ".join(f"`{r}{s}`" for r, s in hand)
-            cards_line = f"   {cards_str}  ➡️ *{hand_value}*"
+            # Для активной руки во время хода показываем “думает” рядом с картами,
+            # для завершённой игры — текст результата отдельной строкой.
+            if table.state == "player_turn" and is_active_hand:
+                cards_line = f"{cards_str} ➡️ *{hand_value}*   (🤔 ДУМАЕТ...)"
+                extra_line = ""
+            else:
+                cards_line = f"{cards_str} ➡️ *{hand_value}*"
+                extra_line = status_text if status_text else ""
 
-            full_status_line = f"\n{status_text}" if status_text else ""
-            players_section += f"{name_line}\n{cards_line}{full_status_line}\n\n"
+            players_section_lines.append(name_line)
+            players_section_lines.append(cards_line)
+            if extra_line:
+                players_section_lines.append(extra_line)
+            players_section_lines.append("")  # пустая строка-разделитель между руками
+
+    players_section = "\n".join(players_section_lines)
 
     p_data = await get_player_data(player.user_id)
     current_balance = p_data['balance']
@@ -556,23 +568,24 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
     shuffle_alert = " 🔄 SHUFFLE" if table.shuffle_alert else ""
     
     info_section = (
-        f"───────────────\n"
+        f"━━━━━━━━━━━━━━━\n"
         f"👝 Баланс: *{current_balance}* ({diff_str})\n"
         f"🃏 Шу: {shoe_bar}{shuffle_alert}"
     )
 
-    chat_section = "\n───────────────\n"
+    chat_section = "\n━━━━━━━━━━━━━━━\n"
     if table.chat_history:
+        chat_section += "💬 Чат стола (последние сообщения):\n"
         chat_section += "\n".join([f"▫️ {msg}" for msg in table.chat_history]) + "\n"
-    chat_section += "✎ _Напишите сообщение в этот чат_"
+    chat_section += "✎ Напишите сообщение в этот чат"
 
     final_text = (
         f"🎰 *TABLE #{table.id}*\n"
-        f"───────────────\n"
+        f"━━━━━━━━━━━━━━━\n"
         f"{dealer_section}"
-        f"───────────────\n"
-        f"{players_section}"
-        f"{info_section}"
+        f"━━━━━━━━━━━━━━━\n"
+        f"{players_section}\n"
+        f"{info_section}\n"
         f"{chat_section}"
     )
     
