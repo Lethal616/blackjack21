@@ -168,6 +168,25 @@ class CardSystem:
             return self.shoe.pop(), True 
         return self.shoe.pop(), False
 
+
+def can_split_cards(card1, card2):
+    """
+    Разрешаем сплит, если:
+    - ранги полностью совпадают (A+A, 7+7 и т.п.), ИЛИ
+    - обе карты имеют ценность 10 (10, J, Q, K в любой комбинации).
+    """
+    r1, _ = card1
+    r2, _ = card2
+
+    if r1 == r2:
+        return True
+
+    ten_like = {"10", "J", "Q", "K"}
+    if r1 in ten_like and r2 in ten_like:
+        return True
+
+    return False
+
     def get_visual_bar(self):
         percent = len(self.shoe) / TOTAL_CARDS
         blocks = int(percent * 8)
@@ -581,11 +600,11 @@ def get_game_kb(table: GameTable, player: TablePlayer):
 
     # Первая строка: Split / Double (если доступны)
     top_row = []
-    # Возможность сплита: две одинаковые карты, одна рука и количество карт = 2
+    # Возможность сплита: две подходящие карты (см. can_split_cards), одна рука и количество карт = 2
     if (
         len(player.hands) == 1
         and len(player.hand) == 2
-        and player.hand[0][0] == player.hand[1][0]
+        and can_split_cards(player.hand[0], player.hand[1])
     ):
         top_row.append(InlineKeyboardButton(text="✂️ SPLIT", callback_data=f"split_{table.id}"))
 
@@ -1466,11 +1485,11 @@ async def cb_split(call: CallbackQuery):
     if not player or table.players[table.current_player_index] != player:
         return await call.answer("Не твой ход!")
 
-    # Сплит возможен только если одна рука и две одинаковые карты
+    # Сплит возможен только если одна рука и две подходящие карты (см. can_split_cards)
     if (
         len(player.hands) != 1
         or len(player.hand) != 2
-        or player.hand[0][0] != player.hand[1][0]
+        or not can_split_cards(player.hand[0], player.hand[1])
     ):
         return await call.answer("Сейчас нельзя делать сплит.", show_alert=True)
 
