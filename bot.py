@@ -17,6 +17,8 @@ from aiogram.exceptions import TelegramBadRequest
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+ADMIN_IDS = [207130075]
+
 if not TOKEN or not DATABASE_URL:
     raise ValueError("No TOKEN or DATABASE_URL provided")
 
@@ -578,6 +580,61 @@ async def finalize_game_db(table: GameTable):
         await log_game(table.id, p.user_id, p_username, p.bet, result_type, win_amount, p.hand, table.dealer_hand)
 
 # ====== ХЕНДЛЕРЫ ======
+# -- АДМИНКА: ВЫДАЧА ФИШЕК --
+@dp.message(Command("add"))
+async def cmd_admin_add(message: types.Message):
+    # 1. Проверка на админа
+    if message.from_user.id not in ADMIN_IDS:
+        return # Просто игнорируем чужаков (пусть думают, что команды нет)
+
+    try:
+        # Парсим команду: /add ID СУММА
+        args = message.text.split()
+        if len(args) != 3:
+            await message.answer("⚠ Формат: `/add ID СУММА`")
+            return
+
+        target_id = int(args[1])
+        amount = int(args[2])
+
+        async with pool.acquire() as conn:
+            # Проверяем, есть ли такой игрок
+            user = await conn.fetchrow("SELECT username, balance FROM users WHERE user_id = $1", target_id)
+            if not user:
+                await message.answer("❌ Игрок с таким ID не найден в базе.")
+                return
+            
+            # Меняем баланс
+            await conn.execute("UPDATE users SET balance = balance + $2 WHERE user_id = $1", target_id, amount)
+            new_bal = user['balance'] + amount
+            
+            # Лог для админа
+            username = user['username'] or "Без ника"
+            action = "Выдано" if amount > 0 else "Снято"
+            await message.answer(
+                f"✅ *Успешно!*\n"
+                f"👤 Игрок: {username} (`{target_id}`)\n"
+                f"💰 {action}: {abs(amount)}\n"
+                f"🏦 Стало: {new_bal}",
+                parse_mode="Markdown"
+            )
+            
+            # Уведомление игроку
+            try:
+                msg_text = ""
+                if amount > 0:
+                    msg_text = f"🎁 *Администратор начислил вам {amount} фишек!*"
+                else:
+                    msg_text = f"📉 *Администратор списал у вас {abs(amount)} фишек.*"
+                
+                await bot.send_message(target_id, msg_text, parse_mode="Markdown")
+            except:
+                await message.answer("⚠ Игрок заблокировал бота, уведомление не доставлено.")
+
+    except ValueError:
+        await message.answer("❌ Ошибка: ID и Сумма должны быть числами.")
+    except Exception as e:
+        await message.answer(f"❌ Системная ошибка: {e}")
 
 class BetState(StatesGroup):
     waiting = State()
