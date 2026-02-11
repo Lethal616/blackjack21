@@ -636,6 +636,63 @@ async def cmd_admin_add(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Системная ошибка: {e}")
 
+@dp.message(Command("delete"))
+async def cmd_admin_delete(message: types.Message):
+    # Команда: /delete ID СУММА — Списать фишки у пользователя
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    try:
+        args = message.text.split()
+        if len(args) != 3:
+            await message.answer("⚠ Формат: `/delete ID СУММА`", parse_mode="Markdown")
+            return
+
+        target_id = int(args[1])
+        amount = int(args[2])
+
+        if amount <= 0:
+            await message.answer("⚠ Сумма должна быть положительным числом.")
+            return
+
+        async with pool.acquire() as conn:
+            user = await conn.fetchrow("SELECT username, balance FROM users WHERE user_id = $1", target_id)
+            if not user:
+                await message.answer("❌ Игрок с таким ID не найден в базе.")
+                return
+
+            # Списываем фишки, не даём балансу уйти в минус
+            await conn.execute(
+                "UPDATE users SET balance = GREATEST(balance - $2, 0) WHERE user_id = $1",
+                target_id,
+                amount,
+            )
+            new_bal = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", target_id)
+
+            username = user["username"] or "Без ника"
+            await message.answer(
+                f"✅ *Списание успешно!*\n"
+                f"👤 Игрок: {username} (`{target_id}`)\n"
+                f"📉 Списано: {amount}\n"
+                f"🏦 Остаток: {new_bal}",
+                parse_mode="Markdown",
+            )
+
+            # Уведомляем игрока
+            try:
+                await bot.send_message(
+                    target_id,
+                    f"📉 *Администратор списал у вас {amount} фишек.*\nТекущий баланс: *{new_bal}* 🪙",
+                    parse_mode="Markdown",
+                )
+            except:
+                await message.answer("⚠ Игрок заблокировал бота, уведомление не доставлено.")
+
+    except ValueError:
+        await message.answer("❌ Ошибка: ID и Сумма должны быть числами.")
+    except Exception as e:
+        await message.answer(f"❌ Системная ошибка: {e}")
+
 class BetState(StatesGroup):
     waiting = State()
     
