@@ -167,6 +167,12 @@ class CardSystem:
             self.create_shoe()
             return self.shoe.pop(), True 
         return self.shoe.pop(), False
+    
+    def get_visual_bar(self):
+        percent = len(self.shoe) / TOTAL_CARDS
+        blocks = int(percent * 8)
+        bar = "▰" * blocks + "▱" * (8 - blocks)
+        return f"{bar} {int(percent * 100)}%"
 
 
 def can_split_cards(card1, card2):
@@ -186,12 +192,6 @@ def can_split_cards(card1, card2):
         return True
 
     return False
-
-    def get_visual_bar(self):
-        percent = len(self.shoe) / TOTAL_CARDS
-        blocks = int(percent * 8)
-        bar = "▰" * blocks + "▱" * (8 - blocks)
-        return f"{bar} {int(percent * 100)}%"
 
 class TablePlayer:
     def __init__(self, user_id, name, bet, start_balance):
