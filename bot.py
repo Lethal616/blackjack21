@@ -178,14 +178,44 @@ class TablePlayer:
     def __init__(self, user_id, name, bet, start_balance):
         self.user_id = user_id
         self.name = name
-        self.bet = bet
+        # Базовая ставка для всех рук (до сплита)
         self.original_bet = bet
-        self.hand = []
-        self.status = "waiting" # waiting, playing, stand, bust, blackjack
+        # Поддержка нескольких рук после сплита
+        self.hands = [[]]              # список рук игрока
+        self._bets = [bet]             # список ставок по рукам
+        self._statuses = ["waiting"]   # статусы по рукам: waiting, playing, stand, bust, blackjack
+        self.current_hand_index = 0    # индекс активной руки
         self.is_ready = False 
         self.message_id = None 
         self.start_balance = start_balance
         self.last_action = None 
+
+    # Текущая рука (для совместимости со старой логикой)
+    @property
+    def hand(self):
+        return self.hands[self.current_hand_index]
+
+    @hand.setter
+    def hand(self, value):
+        self.hands[self.current_hand_index] = value
+
+    # Текущая ставка
+    @property
+    def bet(self):
+        return self._bets[self.current_hand_index]
+
+    @bet.setter
+    def bet(self, value):
+        self._bets[self.current_hand_index] = value
+
+    # Текущий статус
+    @property
+    def status(self):
+        return self._statuses[self.current_hand_index]
+
+    @status.setter
+    def status(self, value):
+        self._statuses[self.current_hand_index] = value
 
     @property
     def value(self):
@@ -199,6 +229,17 @@ class TablePlayer:
     def render_hand(self):
         if not self.hand: return ""
         return " ".join(f"`{r}{s}`" for r, s in self.hand)
+
+    # Есть ли хотя бы одна активная рука
+    def has_active_hand(self):
+        return any(s == "playing" for s in self._statuses)
+
+    # Индекс первой активной руки (или None)
+    def first_active_hand_index(self):
+        for i, s in enumerate(self._statuses):
+            if s == "playing":
+                return i
+        return None
 
 class GameTable:
     def __init__(self, table_id, is_public=False, owner_id=None):
@@ -249,10 +290,13 @@ class GameTable:
         self.state = "waiting"
         self.dealer_hand = []
         for p in self.players:
-            p.hand = []
+            # Сбрасываем все руки и возвращаемся к одной руке
+            p.hands = [[]]
+            p._bets = [p.original_bet]
+            p._statuses = ["waiting"]
+            p.current_hand_index = 0
             p.is_ready = False 
-            p.status = "waiting"
-            p.bet = p.original_bet 
+            p.last_action = None 
             p.last_action = None 
         self.update_activity()
 
@@ -272,9 +316,11 @@ class GameTable:
         self.dealer_hand.append(c)
 
         for p in self.players:
-            p.bet = p.original_bet 
-            p.hand = []
-            p.status = "playing"
+            # На старте раунда всегда одна рука
+            p.hands = [[]]
+            p._bets = [p.original_bet]
+            p._statuses = ["playing"]
+            p.current_hand_index = 0
             p.last_action = None
             c1, s1 = self.deck.get_card()
             c2, s2 = self.deck.get_card()
@@ -289,11 +335,16 @@ class GameTable:
         self.process_turns() 
 
     def process_turns(self):
-        self.update_activity() 
+        self.update_activity()
         while self.current_player_index < len(self.players):
             p = self.players[self.current_player_index]
-            if p.status == "playing":
-                return 
+            # Если у игрока есть активная рука — выбираем её и ждём хода
+            if p.has_active_hand():
+                first_idx = p.first_active_hand_index()
+                if first_idx is not None:
+                    p.current_hand_index = first_idx
+                return
+            # Иначе переходим к следующему игроку
             self.current_player_index += 1
         
         self.state = "dealer_turn"
@@ -338,8 +389,9 @@ async def check_timeouts_loop():
                 if now - table.last_action_time > TURN_TIMEOUT:
                     try:
                         current_p = table.players[table.current_player_index]
-                        current_p.status = "stand" 
-                        current_p.last_action = "stand" 
+                        # При таймауте текущая активная рука автоматически встает
+                        current_p.status = "stand"
+                        current_p.last_action = "stand"
                         
                         table.process_turns()
                         
@@ -405,47 +457,72 @@ async def render_table_for_player(table: GameTable, player: TablePlayer, bot: Bo
 
     players_section = ""
     for p in table.players:
-        status_marker = "💤"
-        status_text = ""
-        action_trail = "" 
-
-        if p.last_action == "hit": action_trail = " (🤏 HIT)"
-        elif p.last_action == "stand": action_trail = " (✋ STAND)"
-        elif p.last_action == "double": action_trail = " (2️⃣ DOUBLE)"
-
-        if table.state == "player_turn":
-            if table.players[table.current_player_index] == p:
-                status_marker = "⏳" 
-                action_trail = " (🤔 ДУМАЕТ...)" 
-            elif table.players.index(p) > table.current_player_index:
-                status_marker = "💤" 
-                action_trail = " (💤 ЖДЕТ)"
-            else:
-                status_marker = "✅" 
-        elif table.state == "finished":
-             d_val = table._hand_value(table.dealer_hand)
-             if p.status == "bust": 
-                 status_marker = "💀"
-                 status_text = "   _❌ ПЕРЕБОР_"
-             elif p.status == "blackjack": 
-                 status_marker = "🔥"
-                 status_text = f"   _*🃏 BLACKJACK! (+{int(p.bet * 1.5)})*_"
-             elif d_val > 21 or (p.value <= 21 and p.value > d_val): 
-                 status_marker = "🏆"
-                 status_text = f"   _*✅ ПОБЕДА (+{p.bet})*_"
-             elif p.value == d_val: 
-                 status_marker = "🤝"
-                 status_text = "   _🤝 НИЧЬЯ_"
-             else: 
-                 status_marker = "❌"
-                 status_text = "   _❌ ПРОИГРЫШ_"
-
         is_me = " (Вы)" if p.user_id == player.user_id else ""
-        name_line = f"{status_marker} *{p.name}*{is_me}{action_trail} • {p.bet}💰"
-        cards_line = f"   {p.render_hand()}  ➡️ *{p.value}*"
-        
-        full_status_line = f"\n{status_text}" if status_text else ""
-        players_section += f"{name_line}\n{cards_line}{full_status_line}\n\n"
+        # Для каждого игрока можем иметь несколько рук (после сплита)
+        for idx, hand in enumerate(p.hands):
+            # Пропускаем пустые руки на всякий случай
+            if not hand:
+                continue
+
+            status_marker = "💤"
+            status_text = ""
+            action_trail = ""
+
+            if p.last_action == "hit":
+                action_trail = " (🤏 HIT)"
+            elif p.last_action == "stand":
+                action_trail = " (✋ STAND)"
+            elif p.last_action == "double":
+                action_trail = " (2️⃣ DOUBLE)"
+            elif p.last_action == "split":
+                action_trail = " (✂️ SPLIT)"
+
+            # Активная ли это рука
+            is_active_hand = (
+                table.state == "player_turn"
+                and table.players[table.current_player_index] == p
+                and p.current_hand_index == idx
+            )
+
+            # Статус и значение руки
+            hand_value = table._hand_value(hand)
+            status = p._statuses[idx]
+            bet = p._bets[idx]
+
+            if table.state == "player_turn":
+                if is_active_hand:
+                    status_marker = "⏳"
+                    action_trail = " (🤔 ДУМАЕТ...)"
+                elif table.players.index(p) > table.current_player_index:
+                    status_marker = "💤"
+                    action_trail = " (💤 ЖДЕТ)"
+                else:
+                    status_marker = "✅"
+            elif table.state == "finished":
+                d_val = table._hand_value(table.dealer_hand)
+                if status == "bust":
+                    status_marker = "💀"
+                    status_text = "   _❌ ПЕРЕБОР_"
+                elif status == "blackjack" or (len(hand) == 2 and hand_value == 21):
+                    status_marker = "🔥"
+                    status_text = f"   _*🃏 BLACKJACK! (+{int(bet * 1.5)})*_"
+                elif d_val > 21 or (hand_value <= 21 and hand_value > d_val):
+                    status_marker = "🏆"
+                    status_text = f"   _*✅ ПОБЕДА (+{bet})*_"
+                elif hand_value == d_val:
+                    status_marker = "🤝"
+                    status_text = "   _🤝 НИЧЬЯ_"
+                else:
+                    status_marker = "❌"
+                    status_text = "   _❌ ПРОИГРЫШ_"
+
+            hand_label = f" (Рука {idx+1})" if len(p.hands) > 1 else ""
+            name_line = f"{status_marker} *{p.name}*{is_me}{hand_label}{action_trail} • {bet}💰"
+            cards_str = " ".join(f"`{r}{s}`" for r, s in hand)
+            cards_line = f"   {cards_str}  ➡️ *{hand_value}*"
+
+            full_status_line = f"\n{status_text}" if status_text else ""
+            players_section += f"{name_line}\n{cards_line}{full_status_line}\n\n"
 
     p_data = await get_player_data(player.user_id)
     current_balance = p_data['balance']
@@ -500,12 +577,31 @@ def get_game_kb(table: GameTable, player: TablePlayer):
     if current_p != player:
         return None 
 
-    kb = [
-        [InlineKeyboardButton(text="🖐 HIT", callback_data=f"hit_{table.id}"),
-         InlineKeyboardButton(text="✋ STAND", callback_data=f"stand_{table.id}")]
-    ]
+    kb = []
+
+    # Первая строка: Split / Double (если доступны)
+    top_row = []
+    # Возможность сплита: две одинаковые карты, одна рука и количество карт = 2
+    if (
+        len(player.hands) == 1
+        and len(player.hand) == 2
+        and player.hand[0][0] == player.hand[1][0]
+    ):
+        top_row.append(InlineKeyboardButton(text="✂️ SPLIT", callback_data=f"split_{table.id}"))
+
     if len(player.hand) == 2:
-        kb.insert(0, [InlineKeyboardButton(text="2️⃣ x2", callback_data=f"double_{table.id}")])
+        top_row.append(InlineKeyboardButton(text="2️⃣ x2", callback_data=f"double_{table.id}"))
+
+    if top_row:
+        kb.append(top_row)
+
+    # Вторая строка: Hit / Stand
+    kb.append(
+        [
+            InlineKeyboardButton(text="🖐 HIT", callback_data=f"hit_{table.id}"),
+            InlineKeyboardButton(text="✋ STAND", callback_data=f"stand_{table.id}"),
+        ]
+    )
     
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -540,44 +636,69 @@ async def finalize_game_db(table: GameTable):
     d_val = table._hand_value(table.dealer_hand)
     
     for p in table.players:
-        data = await get_player_data(p.user_id) 
-        p_username = data.get('username', 'Unknown')
-        stats = data['stats']
-        bal = data['balance']
-        
-        result_type = "loss"
-        win_amount = 0
-        
-        if p.status == "bust":
-            win_amount = -p.bet
-            stats['losses'] += 1
-            result_type = "loss"
-        elif p.status == "blackjack":
-             win_amount = int(p.bet * 1.5)
-             stats['wins'] += 1
-             stats['blackjacks'] += 1
-             result_type = "blackjack"
-        elif d_val > 21 or p.value > d_val:
-            win_amount = p.bet
-            stats['wins'] += 1
-            result_type = "win"
-        elif p.value < d_val:
-            win_amount = -p.bet
-            stats['losses'] += 1
-            result_type = "loss"
-        else:
-            win_amount = 0
-            stats['pushes'] += 1
-            result_type = "push"
+        data = await get_player_data(p.user_id)
+        p_username = data.get("username", "Unknown")
+        stats = data["stats"]
+        bal = data["balance"]
 
-        new_bal = bal + win_amount
-        stats['games'] += 1
-        stats['max_balance'] = max(stats['max_balance'], new_bal)
-        if win_amount > 0: stats['max_win'] = max(stats['max_win'], win_amount)
-            
+        total_win_amount = 0
+
+        # Обрабатываем каждую руку отдельно (для сплита)
+        for idx, hand in enumerate(p.hands):
+            if not hand:
+                continue
+
+            status = p._statuses[idx]
+            bet = p._bets[idx]
+
+            result_type = "loss"
+            win_amount = 0
+
+            hand_val = table._hand_value(hand)
+
+            if status == "bust":
+                win_amount = -bet
+                stats["losses"] += 1
+                result_type = "loss"
+            elif status == "blackjack" or (len(hand) == 2 and hand_val == 21):
+                win_amount = int(bet * 1.5)
+                stats["wins"] += 1
+                stats["blackjacks"] += 1
+                result_type = "blackjack"
+            elif d_val > 21 or (hand_val <= 21 and hand_val > d_val):
+                win_amount = bet
+                stats["wins"] += 1
+                result_type = "win"
+            elif hand_val < d_val and d_val <= 21:
+                win_amount = -bet
+                stats["losses"] += 1
+                result_type = "loss"
+            else:
+                win_amount = 0
+                stats["pushes"] += 1
+                result_type = "push"
+
+            total_win_amount += win_amount
+
+            # Лог отдельной руки
+            await log_game(
+                table.id,
+                p.user_id,
+                p_username,
+                bet,
+                result_type,
+                win_amount,
+                hand,
+                table.dealer_hand,
+            )
+
+        new_bal = bal + total_win_amount
+        stats["games"] += 1
+        stats["max_balance"] = max(stats["max_balance"], new_bal)
+        if total_win_amount > 0:
+            stats["max_win"] = max(stats["max_win"], total_win_amount)
+
         await update_player_stats(p.user_id, new_bal, stats)
-        # ЛОГИРУЕМ ИГРУ С ЮЗЕРНЕЙМОМ
-        await log_game(table.id, p.user_id, p_username, p.bet, result_type, win_amount, p.hand, table.dealer_hand)
 
 # ====== ХЕНДЛЕРЫ ======
 # -- АДМИНКА: ВЫДАЧА ФИШЕК --
@@ -1247,21 +1368,33 @@ async def cb_hit(call: CallbackQuery):
     table = tables.get(tid)
     if not table: return await call.answer("Ошибка")
     player = table.get_player(call.from_user.id)
-    if not player or table.players[table.current_player_index] != player: return await call.answer("Не твой ход!")
-    
+    if not player or table.players[table.current_player_index] != player:
+        return await call.answer("Не твой ход!")
+
     c, s = table.deck.get_card()
     if s: table.shuffle_alert = True
     player.hand.append(c)
     player.last_action = "hit" 
 
     if player.value > 21:
+        # Текущая рука сгорела
         player.status = "bust"
         await call.answer("Перебор!", show_alert=False)
-        table.process_turns()
+        # Переходим к следующей активной руке или игроку
+        next_idx = player.first_active_hand_index()
+        if next_idx is not None:
+            player.current_hand_index = next_idx
+        else:
+            table.process_turns()
     elif player.value == 21:
         player.status = "stand"
         await call.answer("21! Стоп.", show_alert=False)
-        table.process_turns()
+        # Переходим к следующей активной руке или игроку
+        next_idx = player.first_active_hand_index()
+        if next_idx is not None:
+            player.current_hand_index = next_idx
+        else:
+            table.process_turns()
         
     if table.state == "finished": await finalize_game_db(table)
     await update_table_messages(tid)
@@ -1272,12 +1405,20 @@ async def cb_stand(call: CallbackQuery):
     table = tables.get(tid)
     if not table: return
     player = table.get_player(call.from_user.id)
-    if not player or table.players[table.current_player_index] != player: return await call.answer("Не твой ход!")
-        
+    if not player or table.players[table.current_player_index] != player:
+        return await call.answer("Не твой ход!")
+
     player.status = "stand"
-    player.last_action = "stand" 
+    player.last_action = "stand"
     await call.answer("Стоп.")
-    table.process_turns()
+
+    # Если есть ещё активные руки у этого же игрока — переходим к ним,
+    # иначе передаём ход следующему игроку
+    next_idx = player.first_active_hand_index()
+    if next_idx is not None:
+        player.current_hand_index = next_idx
+    else:
+        table.process_turns()
     if table.state == "finished": await finalize_game_db(table)
     await update_table_messages(tid)
 
@@ -1287,8 +1428,9 @@ async def cb_double(call: CallbackQuery):
     table = tables.get(tid)
     if not table: return
     player = table.get_player(call.from_user.id)
-    if not player or table.players[table.current_player_index] != player: return await call.answer("Не твой ход!")
-    
+    if not player or table.players[table.current_player_index] != player:
+        return await call.answer("Не твой ход!")
+
     data = await get_player_data(player.user_id)
     if data['balance'] < player.bet * 2: return await call.answer("Не хватает фишек!", show_alert=True)
     
@@ -1297,12 +1439,63 @@ async def cb_double(call: CallbackQuery):
     player.hand.append(c)
     player.last_action = "double" 
     
-    if player.value > 21: player.status = "bust"
-    else: player.status = "stand"
-    
+    if player.value > 21:
+        player.status = "bust"
+    else:
+        player.status = "stand"
+
     await call.answer("Удвоение!")
-    table.process_turns()
+
+    # После double ход по этой руке заканчивается — переходим дальше
+    next_idx = player.first_active_hand_index()
+    if next_idx is not None:
+        player.current_hand_index = next_idx
+    else:
+        table.process_turns()
     if table.state == "finished": await finalize_game_db(table)
+    await update_table_messages(tid)
+
+@dp.callback_query(lambda c: c.data.startswith("split_"))
+async def cb_split(call: CallbackQuery):
+    tid = call.data.split("_")[1]
+    table = tables.get(tid)
+    if not table:
+        return
+
+    player = table.get_player(call.from_user.id)
+    if not player or table.players[table.current_player_index] != player:
+        return await call.answer("Не твой ход!")
+
+    # Сплит возможен только если одна рука и две одинаковые карты
+    if (
+        len(player.hands) != 1
+        or len(player.hand) != 2
+        or player.hand[0][0] != player.hand[1][0]
+    ):
+        return await call.answer("Сейчас нельзя делать сплит.", show_alert=True)
+
+    # Проверяем, хватает ли баланса на вторую ставку
+    data = await get_player_data(player.user_id)
+    if data["balance"] < player.bet * 2:
+        return await call.answer("Не хватает фишек для сплита!", show_alert=True)
+
+    # Разделяем карты на две руки
+    first_card, second_card = player.hand
+    original_bet = player.bet
+
+    player.hands = [[first_card], [second_card]]
+    player._bets = [original_bet, original_bet]
+    player._statuses = ["playing", "playing"]
+    player.current_hand_index = 0
+    player.last_action = "split"
+
+    # Добираем карту к первой руке сразу
+    c, s = table.deck.get_card()
+    if s:
+        table.shuffle_alert = True
+    player.hand.append(c)
+
+    await call.answer("Руки разделены! Играем первую руку.")
     await update_table_messages(tid)
 
 # -- СТАТИСТИКА (С РЕФЕРАЛАМИ) --
