@@ -428,21 +428,30 @@ async def check_timeouts_loop():
 # ====== ВИЗУАЛИЗАЦИЯ ======
 
 def render_lobby(table: GameTable):
-    txt = f"🎰 *BLACKJACK TABLE #{table.id}*\n"
-    txt += f"───────────────\n"
-    
+    txt = f"🎰 *BLACKJACK LOBBY #{table.id}*\n"
+    txt += f"━━━━━━━━━━━━━━━\n"
+
+    owner_name = None
+    for p in table.players:
+        if p.user_id == table.owner_id:
+            owner_name = p.name
+            break
+
+    if owner_name:
+        txt += f"👑 Хост: *{owner_name}*\n"
+
+    txt += f"👥 Игроки: {len(table.players)}/{MAX_PLAYERS}\n"
+    txt += "━━━━━━━━━━━━━━━\n"
+
     for i, p in enumerate(table.players, 1):
         role = "👑" if p.user_id == table.owner_id else "👤"
         status = "✅ ГОТОВ" if p.is_ready else "⏳ НЕ ГОТОВ"
-        txt += f"{status} {role} *{p.name}* — {p.bet} 🪙\n"
-    
-    txt += f"───────────────\n"
-    txt += f"👥 Мест: {len(table.players)}/{MAX_PLAYERS}\n"
-    
+        txt += f"{status} {role} *{p.name}* • {p.bet}🪙\n"
+
     if table.chat_history:
-        txt += "\n💬 *LIVE CHAT:*\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
+        txt += "\n💬 Чат стола:\n" + "\n".join([f"▫️ {msg}" for msg in table.chat_history])
     else:
-        txt += "\n💬 (Напишите сообщение...)"
+        txt += "\n✎ Напишите сообщение в этот чат"
 
     return txt
 
@@ -451,8 +460,10 @@ def get_lobby_kb(table: GameTable, user_id):
     p = table.get_player(user_id)
     
     if not p.is_ready:
-        kb.append([InlineKeyboardButton(text="✅ Я ГОТОВ", callback_data=f"ready_{table.id}")])
-        kb.append([InlineKeyboardButton(text="💰 Изм. ставку", callback_data=f"chbet_lobby_{table.id}")])
+        kb.append([
+            InlineKeyboardButton(text="✅ Я ГОТОВ", callback_data=f"ready_{table.id}"),
+            InlineKeyboardButton(text="💰 Изм. ставку", callback_data=f"chbet_lobby_{table.id}")
+        ])
     
     kb.append([InlineKeyboardButton(text="🚪 Выйти", callback_data=f"leave_lobby_{table.id}")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
@@ -933,12 +944,15 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 def main_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Одиночная игра", callback_data="play_solo")],
-        [InlineKeyboardButton(text="👥 Онлайн столы", callback_data="play_multi")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="🎁 Бесплатные фишки", callback_data="free_chips")],
-        # Обрати внимание: я поменял порядок кнопок, чтобы было красивее (бесплатное рядом)
-        [InlineKeyboardButton(text="🤝 Реферальная программа", callback_data="ref_system")]
+        [
+            InlineKeyboardButton(text="👤 Одиночная игра", callback_data="play_solo"),
+            InlineKeyboardButton(text="👥 Онлайн столы", callback_data="play_multi"),
+        ],
+        [
+            InlineKeyboardButton(text="📊 Статистика", callback_data="stats"),
+            InlineKeyboardButton(text="🎁 Бесплатные фишки", callback_data="free_chips"),
+        ],
+        [InlineKeyboardButton(text="🤝 Реферальная программа", callback_data="ref_system")],
     ])
 
 @dp.callback_query(lambda c: c.data == "menu")
@@ -996,10 +1010,18 @@ async def cb_ref_system(call: CallbackQuery):
 @dp.callback_query(lambda c: c.data == "play_solo")
 async def cb_play_solo(call: CallbackQuery):
     data = await get_player_data(call.from_user.id)
-    kb = [[InlineKeyboardButton(text=f"💰 {b}", callback_data=f"start_solo_{b}")] for b in BET_OPTIONS]
-    kb.append([InlineKeyboardButton(text="✍️ Своя ставка", callback_data="custom_bet")])
-    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="menu")])
-    await call.message.edit_text(f"🪙 Баланс: {data['balance']}\nВыберите ставку:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    kb = [
+        [InlineKeyboardButton(text=f"💰 {b}", callback_data=f"start_solo_{b}") for b in BET_OPTIONS],
+        [InlineKeyboardButton(text="✍️ Своя ставка", callback_data="custom_bet")],
+        [InlineKeyboardButton(text="🔙 В главное меню", callback_data="menu")],
+    ]
+    text = (
+        f"🎮 *Одиночная игра*\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🪙 Баланс: *{data['balance']}*\n\n"
+        f"Выберите размер ставки:"
+    )
+    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(lambda c: c.data.startswith("start_solo_"))
 async def cb_start_solo(call: CallbackQuery):
@@ -1026,7 +1048,7 @@ async def cb_start_solo(call: CallbackQuery):
 # -- Кастомная ставка (СОЛО) --
 @dp.callback_query(lambda c: c.data == "custom_bet")
 async def cb_custom_input(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("✍️ Введите ставку:")
+    await call.message.edit_text("✍️ Введите размер своей ставки (целое число):")
     await state.set_state(BetState.waiting)
 
 @dp.message(BetState.waiting)
@@ -1099,11 +1121,17 @@ async def cb_play_multi(call: CallbackQuery):
     if not waiting_tables:
          kb.append([InlineKeyboardButton(text="📭 Нет активных столов", callback_data="noop")])
 
-    kb.append([InlineKeyboardButton(text="➕ Создать стол", callback_data="create_table_setup")])
-    kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_multi")]) 
-    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="menu")])
+    kb.append([
+        InlineKeyboardButton(text="➕ Создать стол", callback_data="create_table_setup"),
+        InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_multi"),
+    ])
+    kb.append([InlineKeyboardButton(text="🔙 В главное меню", callback_data="menu")])
     
-    text = "👥 *Онлайн Лобби*\nНажмите на стол, чтобы присоединиться:"
+    text = (
+        "👥 *Онлайн‑лобби*\n"
+        "━━━━━━━━━━━━━━━\n"
+        "Выберите стол, чтобы присоединиться, или создайте свой."
+    )
     
     if call.data == "refresh_multi":
          try: await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -1118,10 +1146,17 @@ async def cb_noop(call: CallbackQuery):
 # -- 1. Создание стола --
 @dp.callback_query(lambda c: c.data == "create_table_setup")
 async def cb_create_setup(call: CallbackQuery):
-    kb = [[InlineKeyboardButton(text=f"💰 {b}", callback_data=f"new_multi_{b}")] for b in BET_OPTIONS]
-    kb.append([InlineKeyboardButton(text="✍️ Своя ставка", callback_data="multi_custom_create")])
-    kb.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="play_multi")])
-    await call.message.edit_text("С какой ставкой вы хотите создать стол?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    kb = [
+        [InlineKeyboardButton(text=f"💰 {b}", callback_data=f"new_multi_{b}") for b in BET_OPTIONS],
+        [InlineKeyboardButton(text="✍️ Своя ставка", callback_data="multi_custom_create")],
+        [InlineKeyboardButton(text="🔙 Назад в лобби", callback_data="play_multi")],
+    ]
+    text = (
+        "🃏 *Создание стола*\n"
+        "━━━━━━━━━━━━━━━\n"
+        "Выберите базовую ставку для стола:"
+    )
+    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 @dp.callback_query(lambda c: c.data.startswith("new_multi_"))
 async def cb_new_multi_created(call: CallbackQuery):
@@ -1130,7 +1165,7 @@ async def cb_new_multi_created(call: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "multi_custom_create")
 async def cb_multi_custom_create_input(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("✍️ Введите ставку для стола:")
+    await call.message.edit_text("✍️ Введите ставку для стола (целое число):")
     await state.set_state(MultiCustomBet.waiting)
     await state.update_data(mode="create")
 
@@ -1171,7 +1206,7 @@ async def cb_prejoin(call: CallbackQuery):
 @dp.callback_query(lambda c: c.data.startswith("multi_custom_join_"))
 async def cb_multi_custom_join_input(call: CallbackQuery, state: FSMContext):
     tid = call.data.split("_")[3]
-    await call.message.edit_text(f"✍️ Введите ставку для входа (Стол #{tid}):")
+    await call.message.edit_text(f"✍️ Введите ставку для входа (Стол #{tid}, целое число):")
     await state.set_state(MultiCustomBet.waiting)
     await state.update_data(mode="join", tid=tid)
 
@@ -1312,7 +1347,7 @@ async def cb_rematch_or_change(call: CallbackQuery):
 @dp.callback_query(lambda c: c.data.startswith("multi_custom_rebet_"))
 async def cb_multi_custom_rebet_input(call: CallbackQuery, state: FSMContext):
     tid = call.data.split("_")[3]
-    await call.message.edit_text(f"✍️ Введите новую ставку (Стол #{tid}):")
+    await call.message.edit_text(f"✍️ Введите новую ставку (Стол #{tid}, целое число):")
     await state.set_state(MultiCustomBet.waiting)
     await state.update_data(mode="rebet", tid=tid)
 
