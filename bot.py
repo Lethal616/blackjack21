@@ -61,9 +61,12 @@ async def init_db():
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
         except: pass
 
-        # --- НОВОЕ: ДОБАВЛЯЕМ КОЛОНКУ ДЛЯ РЕФЕРАЛОВ ---
+        # --- РЕФЕРАЛЫ: referrer_id и флаг выплаты бонуса после 10 игр ---
         try:
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id BIGINT")
+        except: pass
+        try:
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_bonus_paid BOOLEAN DEFAULT FALSE")
         except: pass
         # ----------------------------------------------
 
@@ -135,6 +138,42 @@ async def update_player_stats(user_id, balance, stats):
             WHERE user_id = $1
         """, user_id, balance, stats["games"], stats["wins"], stats["losses"], 
            stats["pushes"], stats["blackjacks"], stats["max_balance"], stats["max_win"])
+
+
+# Реферальный бонус начисляется только после 10 сыгранных игр приглашённого
+REFERRAL_BONUS_GAMES_REQUIRED = 10
+REFERRAL_BONUS_REFERRED = 3000
+REFERRAL_BONUS_REFERRER = 5000
+
+
+async def try_apply_referral_bonus(referred_user_id: int, new_games_count: int):
+    """
+    Если у игрока есть referrer и бонус ещё не выплачен и сыграно >= 10 игр —
+    начисляем бонусы обоим и помечаем выплату. Возвращает referrer_id при успехе, иначе None.
+    """
+    if new_games_count < REFERRAL_BONUS_GAMES_REQUIRED:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT referrer_id, referral_bonus_paid FROM users WHERE user_id = $1",
+            referred_user_id,
+        )
+        if not row or row["referrer_id"] is None:
+            return None
+        if row.get("referral_bonus_paid"):
+            return None
+        referrer_id = row["referrer_id"]
+        await conn.execute(
+            "UPDATE users SET balance = balance + $2, referral_bonus_paid = TRUE WHERE user_id = $1",
+            referred_user_id,
+            REFERRAL_BONUS_REFERRED,
+        )
+        await conn.execute(
+            "UPDATE users SET balance = balance + $2 WHERE user_id = $1",
+            referrer_id,
+            REFERRAL_BONUS_REFERRER,
+        )
+    return referrer_id
 
 async def log_game(table_id, user_id, username, bet, result, win_amount, p_hand, d_hand):
     async with pool.acquire() as conn:
@@ -743,6 +782,26 @@ async def finalize_game_db(table: GameTable):
 
         await update_player_stats(p.user_id, new_bal, stats)
 
+        # Реферальный бонус: начисляем обоим после 10-й игры приглашённого
+        referrer_id = await try_apply_referral_bonus(p.user_id, stats["games"])
+        if referrer_id is not None:
+            try:
+                await bot.send_message(
+                    p.user_id,
+                    f"🎉 *Реферальный бонус!*\nВы сыграли {REFERRAL_BONUS_GAMES_REQUIRED} партий — вам начислено *+{REFERRAL_BONUS_REFERRED}* фишек! 🪙",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            try:
+                await bot.send_message(
+                    referrer_id,
+                    f"🎉 *Ваш реферал сыграл {REFERRAL_BONUS_GAMES_REQUIRED} партий!*\nВам начислено *+{REFERRAL_BONUS_REFERRER}* фишек 🪙",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+
 # ====== ХЕНДЛЕРЫ ======
 # -- АДМИНКА: ВЫДАЧА ФИШЕК --
 @dp.message(Command("add"))
@@ -901,27 +960,17 @@ async def cmd_start(message: types.Message, state: FSMContext):
         if username and row['username'] != username:
             await conn.execute("UPDATE users SET username = $2 WHERE user_id = $1", user_id, username)
 
-        # 2. ЛОГИКА РЕФЕРАЛКИ (Только если игрок новый)
+        # 2. РЕФЕРАЛКА: только записываем пригласившего; бонусы — после 10 игр приглашённого
         if is_new_player and referrer_candidate and referrer_candidate != user_id:
             ref_row = await conn.fetchrow("SELECT user_id FROM users WHERE user_id = $1", referrer_candidate)
-            
             if ref_row:
-                # Начисляем бонусы
-                await conn.execute("UPDATE users SET balance = balance + 3000, referrer_id = $2 WHERE user_id = $1", user_id, referrer_candidate)
-                await conn.execute("UPDATE users SET balance = balance + 5000 WHERE user_id = $1", referrer_candidate)
-                
-                # Уведомляем пригласителя
-                try:
-                    await bot.send_message(
-                        referrer_candidate, 
-                        f"🎉 *Новый реферал!*\n"
-                        f"По вашей ссылке пришел игрок {message.from_user.first_name}.\n"
-                        f"Вам начислено: *+5000* 🪙"
-                    , parse_mode="Markdown")
-                except: pass
-                
-                # Уведомляем новичка (отдельным сообщением перед меню)
-                await message.answer("🤝 *Вы пришли по приглашению!*\nВам начислен стартовый бонус: *+3000* фишек! 💰", parse_mode="Markdown")
+                await conn.execute("UPDATE users SET referrer_id = $2 WHERE user_id = $1", user_id, referrer_candidate)
+                await message.answer(
+                    "🤝 *Вы пришли по приглашению!*\n\n"
+                    f"Сыграйте *{REFERRAL_BONUS_GAMES_REQUIRED} партий* — тогда вы получите *+{REFERRAL_BONUS_REFERRED}* фишек, "
+                    f"а пригласивший вас — *+{REFERRAL_BONUS_REFERRER}* 🪙",
+                    parse_mode="Markdown",
+                )
 
         # 3. ПОЛУЧАЕМ ДАННЫЕ И ОТПРАВЛЯЕМ МЕНЮ (ВСЕГДА!)
         # Важно заново запросить данные из базы, так как баланс мог измениться после бонуса
